@@ -48,6 +48,9 @@ TR: dict[str, str] = {
         "Bazı siteler (ör. MSI) görünmez Chrome'u reddediyor. Açıkken bu sitelerde Chrome kendini normal "
         "masaüstü Chrome olarak tanıtır. Site kurallarına aykırı olabilir; istemezseniz kapatın.",
     "Language": "Dil",
+    "All": "Tümü",
+    " · {u} new": " · {u} yeni",
+    "No items of this kind.": "Bu türde kayıt yok.",
     "Data: {path} · Version {v}": "Kayıtlar: {path} · Sürüm {v}",
     "Nothing is being tracked yet.": "Henüz takip edilen bir şey yok.",
     "Paste your motherboard's BIOS page, a graphics or chipset driver page, or a device's firmware page into the "

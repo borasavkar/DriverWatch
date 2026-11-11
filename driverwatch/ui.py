@@ -739,6 +739,14 @@ class MainWindow(QMainWindow):
         bar.addWidget(b_imp)
         v.addLayout(bar)
 
+        # kind tabs: All / BIOS / Driver / Firmware / Software / Other
+        self.tab = self.store.settings.get("tab", "all")
+        if self.tab != "all" and self.tab not in KINDS:
+            self.tab = "all"
+        self.tabs_row = QHBoxLayout()
+        self.tabs_row.setSpacing(6)
+        v.addLayout(self.tabs_row)
+
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -767,7 +775,14 @@ class MainWindow(QMainWindow):
                 w.deleteLater()
         st = states()
         items = sorted(self.store.items, key=lambda i: (st.get(i.state, st["new"])[3], i.name.lower()))
-        if not items:
+        self._render_tabs()
+        if self.tab != "all":
+            items = [i for i in items if i.kind == self.tab]
+            if not items and self.store.items:
+                e = QLabel(_("No items of this kind."))
+                e.setStyleSheet(f"color:{C['muted']}; background:{C['panel']}; border:1px dashed {C['line']}; border-radius:10px; padding:18px;")
+                self.listl.addWidget(e)
+        if not self.store.items:
             e = QLabel(
                 f"<div style='font-size:12pt'><b>{_('Nothing is being tracked yet.')}</b></div>"
                 f"<div style='color:{C['muted']}; margin-top:6px'>"
@@ -781,6 +796,41 @@ class MainWindow(QMainWindow):
             self.listl.addWidget(Card(self, it, it.id in self.checking))
         self.listl.addStretch(1)
         self._render_summary()
+
+    def _render_tabs(self):
+        while self.tabs_row.count():
+            w = self.tabs_row.takeAt(0).widget()
+            if w:
+                w.deleteLater()
+        for key in ["all"] + KINDS:
+            group = self.store.items if key == "all" else [i for i in self.store.items if i.kind == key]
+            n_up = sum(1 for i in group if i.state == "update")
+            text = _("All") if key == "all" else kind_label(key)
+            text = f"{text}  {len(group)}" + (_(" · {u} new", u=n_up) if n_up else "")
+            b = QPushButton(text)
+            b.setCheckable(True)
+            b.setChecked(key == self.tab)
+            fg, bg = (C["text"], C["accent"]) if key == "all" else KIND_COLORS.get(key, KIND_COLORS["Diğer"])
+            if key == "all":
+                on = f"background:{C['blue_bg']}; border:1px solid {C['accent']}; color:{C['text']};"
+            else:
+                on = f"background:{bg}; border:1px solid {fg}; color:{fg};"
+            off_color = C["red"] if n_up else C["muted"]
+            b.setStyleSheet(
+                f"QPushButton {{ background:{C['panel']}; border:1px solid {C['line']}; color:{off_color};"
+                f" border-radius:14px; padding:5px 14px; font-weight:600; }}"
+                f"QPushButton:checked {{ {on} }}"
+                f"QPushButton:hover {{ border-color:{fg if key != 'all' else C['accent']}; }}"
+            )
+            b.clicked.connect(lambda _c=False, k=key: self._set_tab(k))
+            self.tabs_row.addWidget(b)
+        self.tabs_row.addStretch(1)
+
+    def _set_tab(self, key: str):
+        self.tab = key
+        self.store.settings["tab"] = key
+        self.store.save()
+        self.render()
 
     def _render_summary(self):
         while self.summary.count():
