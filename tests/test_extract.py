@@ -108,6 +108,35 @@ class DateTrackingTests(unittest.TestCase):
         self.assertEqual(find_files(raw, "https://www.asus.com/tr/x/"), self.FILES)
 
 
+ROG = """ROG Strix XG27ACS Gen2 (XG27ACSR) | 27 - 31.5 inç | Gaming Monitörler | ROG
+BIOS & Firmware
+Firmware
+ASUS_XG27ACSR_MCM102
+Sürüm {v}
+10.1 MB 2026/07/30
+SHA-256 :D3B9E151BA522065891ECD806B8FCA37B1C205188FB63A5777234390BF555CB7
+Optimize sleep wake-up function and ELMB effect.
+DOWNLOAD
+Disclaimer
+USB 3.0, 3.1, 3.2 ve/veya Type-C'nin gerçek aktarım hızı, ana bilgisayarın işlem hızı, dosya özellikleri ve diğer etkenlere bağlıdır.
+"""
+
+
+class LabeledVersionTests(unittest.TestCase):
+    def test_rog_firmware_label_version_and_no_prose_numbers(self):
+        files = ["https://dlcdnets.asus.com/pub/ASUS/LCD%20Monitors/XG27ACSR/ASUS_XG27ACSR_MCM102.zip"]
+        c = extract_candidates(ROG.format(v="MCM102"), [], files)
+        self.assertEqual(c[0].version, "MCM102")
+        self.assertEqual(c[0].date, "2026-07-30")
+        self.assertEqual(c[0].link, files[0])
+        versions = [x.version for x in c]
+        for junk in ("3.0", "3.1", "3.2", "31.5"):
+            self.assertNotIn(junk, versions)
+        picked, _ = pick_tracked(extract_candidates(ROG.format(v="MCM103")), anchor_from(c[0]))
+        self.assertEqual(picked.version, "MCM103")
+        self.assertTrue(is_newer("MCM103", "MCM102"))
+
+
 class ExtractTests(unittest.TestCase):
     def test_amd_finds_chipset_first_and_skips_file_size(self):
         c = extract_candidates(AMD.format(chip="8.09.28.1124", chipdate="2026-10-21"))

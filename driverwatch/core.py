@@ -182,11 +182,14 @@ def probe(url: str, browser: Browser, need_chrome_if_empty: bool = True) -> Prob
         http_err = str(e)
     if p.candidates and not need_chrome_if_empty:
         return p
-    if not p.candidates or "#" in url:
+    # Düz okumada güçlü bir aday yoksa içerik büyük olasılıkla JavaScript ile yükleniyordur
+    weak = not p.candidates or p.candidates[0].score < 5
+    if weak or "#" in url:
         try:
             page = browser.fetch(url)
             cands = page_candidates(page.text, page.links, page.files, page.data_text)
-            if cands or not p.page:
+            best_http = p.candidates[0].score if p.candidates else -99
+            if (cands and cands[0].score >= best_http) or not p.page:
                 p.page, p.candidates = page, cands
         except BlockedError as e:
             if not p.candidates:

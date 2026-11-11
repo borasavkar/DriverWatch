@@ -82,6 +82,13 @@ _VER_DOTTED = re.compile(
 )
 # MSI biçimi: 7E16v1D4, 7E16v1CC
 _VER_MSI = re.compile(r"(?<![\w])([0-9A-Z]{4}v[0-9A-Z]{2,5})(?![\w])")
+# Etiketli sürüm: "Sürüm MCM102", "Version: 0302", "Rev. A12" — etiketten sonraki ilk sözcük
+_VER_LABELED = re.compile(
+    r"(?:\bversion|\bsürüm|\bsurum|\bver\.?|\brevision|\brev\.?|\bfirmware version)\s*[:#]?\s*"
+    r"(?![vV]?\d{1,4}(?:\.\d)+\b)([A-Za-z0-9][A-Za-z0-9_.\-]{1,29})(?![\w])",
+    re.IGNORECASE,
+)
+_LABEL_STOP = {"history", "notes", "number", "numarası", "bilgisi", "info", "date", "tarihi", "details", "seçin", "select"}
 
 _KEYWORDS = re.compile(
     r"version|ver\.|sürüm|surum|firmware|driver|sürücü|bios|updater|release|chipset|software|"
@@ -90,7 +97,7 @@ _KEYWORDS = re.compile(
 )
 _NOISE = re.compile(r"copyright|©|all rights reserved|cookie|privacy|telif", re.IGNORECASE)
 _URL = re.compile(r"https?://[^\s|\"'<>]+")
-_UNIT_AFTER = re.compile(r"\s*(?:mb|gb|kb|tb|bytes?|ghz|mhz|hz|mm|cm|inch)(?![a-z])|\s*%", re.IGNORECASE)
+_UNIT_AFTER = re.compile(r"\s*(?:mb|gb|kb|tb|bytes?|ghz|mhz|hz|mm|cm|inch|inç|in\b|\"|”)(?![a-z])|\s*%", re.IGNORECASE)
 
 
 @dataclass
@@ -245,11 +252,28 @@ def extract_candidates(
     for i, line in enumerate(lines):
         if _NOISE.search(line) or len(line) > 400:
             continue
-        found = [(m.start(1), m.end(1), m.group(1)) for m in _VER_DOTTED.finditer(line)]
-        found += [(m.start(1), m.end(1), m.group(1)) for m in _VER_MSI.finditer(line)]
+        found = []
+        for m in _VER_DOTTED.finditer(line):
+            a = m.start(1)
+            # uzun cümlenin içindeki sayı ("USB 3.0, 3.1, 3.2 ...") sürüm değildir; hemen önünde etiket olmalı
+            if len(line) > 80 and not _KEYWORDS.search(line[max(0, a - 25):a]):
+                continue
+            found.append((a, m.end(1), m.group(1), False))
+        found += [(m.start(1), m.end(1), m.group(1), False) for m in _VER_MSI.finditer(line)]
+        taken = [(a, b) for a, b, *_ in found]
+        for m in _VER_LABELED.finditer(line):
+            v = m.group(1).rstrip(".-_")
+            if (
+                len(line) > 80
+                or v.lower() in _LABEL_STOP
+                or not re.search(r"\d", v)
+                or any(m.start(1) < y and m.end(1) > x for x, y in taken)
+            ):
+                continue
+            found.append((m.start(1), m.start(1) + len(v), v, True))
         date_spans = [(a, b) for a, b, _ in find_dates(line)]
         url_spans = [(m.start(), m.end()) for m in _URL.finditer(line)]
-        for a, b, v in found:
+        for a, b, v, labeled in found:
             if any(a >= x and b <= y for x, y in date_spans + url_spans):
                 continue
             if _looks_like_date(v) or _UNIT_AFTER.match(line, b):
@@ -267,7 +291,7 @@ def extract_candidates(
                 template=line[:a] + "{V}" + line[b:],
                 index=idx,
                 after=after,
-                shape=shape_of(v),
+                shape="label" if labeled else shape_of(v),
             )
             idx += 1
             # tarih: aynı satır, sonra sonraki satırlar, sonra önceki satır
@@ -357,11 +381,13 @@ def page_candidates(text: str, links, files, data_text: str = "") -> list[Candid
 
 def find_link_for(version: str, links: list[tuple[str, str]]) -> str:
     core = version.lstrip("vV").lower()
-    if len(core) < 3:
-        return ""
+    if len(core.replace(".", "")) < 4:
+        return ""  # "3.1" gibi kısa sayılar her adreste geçebilir
+    variants = {core, core.replace(".", "_")} | ({core.replace(".", "")} if len(core.replace(".", "")) >= 5 else set())
     for _text, href in links:
-        h = href.lower()
-        if core in h or core.replace(".", "_") in h or core.replace(".", "") in h:
+        # yalnızca dosya adında ara (ürün sayfasının adresindeki sayılar sayılmasın)
+        name = href.lower().split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
+        if any(v in name for v in variants):
             return href
     return ""
 
@@ -378,7 +404,7 @@ def _score(c: Candidate, line: str, prev: str) -> float:
         s += 2
     if c.link:
         s += 2
-    if c.shape == "msi":
+    if c.shape in ("msi", "label"):
         s += 3
     else:
         n = c.version.count(".") + 1

@@ -147,6 +147,22 @@ def fetch_http(url: str, timeout: int = 20) -> Page:
     )
 
 
+_API_HINT = re.compile(r"bios|driver|firmware|download|support|software|utility|file", re.I)
+
+
+def fetch_api_texts(urls: list[str], limit: int = 8) -> str:
+    """Sayfanın yüklediği, indirmeyle ilgili görünen veri yanıtlarını metin olarak döndür."""
+    out = []
+    for u in [u for u in urls if _API_HINT.search(u)][:limit]:
+        try:
+            r = requests.get(u, headers={"User-Agent": UA}, timeout=10)
+        except requests.RequestException:
+            continue
+        if r.ok and len(r.content) < 3_000_000 and "json" in r.headers.get("content-type", "") + u.lower():
+            out.append(r.text)
+    return "\n".join(out)
+
+
 class Browser:
     """Tek bir görünmez Chrome örneği; yalnızca gerektiğinde açılır."""
 
@@ -195,6 +211,13 @@ class Browser:
             raise BlockedError("Site otomatik kontrole izin vermiyor")
         try:
             src = d.page_source or ""
+            # Sayfanın arka planda kendisinin çağırdığı veri adreslerini (ör. ASUS GetPDBIOS) de oku:
+            # indirme düğmesinin adresi çoğu zaman yalnızca bu yanıtlarda bulunur.
+            api = d.execute_script(
+                "return performance.getEntriesByType('resource')"
+                ".filter(r=>r.initiatorType==='xmlhttprequest'||r.initiatorType==='fetch').map(r=>r.name)"
+            ) or []
+            src += "\n" + fetch_api_texts(api)
             files, data = find_files(src, d.current_url or url), data_text_of(src)
         except Exception:  # noqa: BLE001
             files, data = [], ""
