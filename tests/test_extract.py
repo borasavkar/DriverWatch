@@ -158,6 +158,20 @@ class BetaTests(unittest.TestCase):
         self.assertEqual(picked.version, "7E16v1D5")
 
 
+class PackageCompareTests(unittest.TestCase):
+    def test_repackaged_same_driver_is_up_to_date(self):
+        from driverwatch.core import Item
+
+        it = Item(url="x", installed="2026-03-17", latest="2026-07-13", installed_device="ROG STRIX XG27ACSR",
+                  installed_dev_version="1.0.0.0", pkg_version="1.0.0.0", pkg_date="2026-03-17",
+                  anchor={"shape": "date"})
+        it.recompute_state()
+        self.assertEqual(it.state, "ok")
+        it.pkg_version, it.pkg_date = "1.0.1.0", "2026-07-01"
+        it.recompute_state()
+        self.assertEqual(it.state, "update")
+
+
 class ExtractTests(unittest.TestCase):
     def test_amd_finds_chipset_first_and_skips_file_size(self):
         c = extract_candidates(AMD.format(chip="8.09.28.1124", chipdate="2026-10-21"))

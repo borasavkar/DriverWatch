@@ -34,6 +34,9 @@ class Item:
     installed_auto: bool = False  # BIOS: yüklü sürümü bilgisayardan oku
     installed_app: str = ""  # Windows "Yüklü uygulamalar" listesindeki ad; sürüm her kontrolde oradan okunur
     installed_device: str = ""  # Aygıt Yöneticisi'ndeki aygıt adı; sürücü sürümü/tarihi oradan okunur
+    installed_dev_version: str = ""  # o aygıtın yüklü sürücü sürümü (ör. 1.0.0.0)
+    pkg_version: str = ""  # sitedeki paketin içindeki sürücü sürümü (INF DriverVer)
+    pkg_date: str = ""  # paketin içindeki sürücü tarihi (ISO)
     via: str = ""  # son kontrolde sayfa nasıl okundu: http | chrome | chrome-kimlik
     latest: str = ""
     latest_date: str = ""
@@ -47,6 +50,17 @@ class Item:
 
     def recompute_state(self):
         if self.state in ("blocked", "error", "lost") and not self.latest:
+            return
+        # Sitedeki tarih paketin yayın tarihidir; içindeki sürücü aynı olabilir. Paketin içi okunabildiyse
+        # karşılaştırma bilgisayardaki sürücü sürümüyle yapılır.
+        if self.pkg_version and self.installed_dev_version:
+            if is_newer(self.pkg_version, self.installed_dev_version):
+                self.state = "update"
+            elif same_version(self.pkg_version, self.installed_dev_version) and self.pkg_date and self.installed \
+                    and self.pkg_date > self.installed:
+                self.state = "update"  # aynı numara, daha yeni tarihli sürücü
+            else:
+                self.state = "ok"
             return
         if not self.latest:
             self.state = "new"
@@ -258,6 +272,67 @@ def suggest_device(name: str, devices: dict[str, dict] | None = None) -> str:
     return best
 
 
+PKG_MAX_BYTES = 30 * 1024 * 1024  # yalnızca küçük sürücü paketleri indirilir
+
+
+def package_driver_info(link: str, model_hint: str = "", site_date: str = "") -> dict | None:
+    """Sitedeki .zip paketini indirip içindeki .inf dosyasından DriverVer'i okur.
+
+    Hiçbir dosya çalıştırılmaz ya da diske açılmaz; yalnızca .inf metni okunur.
+    Sonuç aynı link için önbellekte tutulur (paket değişince link ya da sitedeki tarih değişir).
+    """
+    import io
+    import re
+    import zipfile
+
+    import requests
+
+    from .fetch import UA
+
+    if not link.lower().split("?")[0].endswith(".zip"):
+        return None
+    cache_path = data_dir() / "packages.json"
+    try:
+        cache = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        cache = {}
+    key = f"{link}|{site_date}"  # ASUS aynı adla yeniden yayınlıyor; tarih değişince yeniden bak
+    if key in cache:
+        return cache[key] or None
+    info = None
+    try:
+        with requests.get(link, headers={"User-Agent": UA}, timeout=30, stream=True) as r:
+            r.raise_for_status()
+            if int(r.headers.get("content-length") or 0) > PKG_MAX_BYTES:
+                return None
+            buf = io.BytesIO()
+            for chunk in r.iter_content(65536):
+                buf.write(chunk)
+                if buf.tell() > PKG_MAX_BYTES:
+                    return None
+        z = zipfile.ZipFile(buf)
+        infs = [n for n in z.namelist() if n.lower().endswith(".inf")]
+        # birden fazla .inf varsa adında model numarası geçeni öne al
+        tokens = re.findall(r"[a-z]+\d+[a-z\d]*|\d+[a-z]+[a-z\d]*", model_hint.lower())
+        infs.sort(key=lambda n: not any(t in n.lower() for t in tokens))
+        for name in infs:
+            raw = z.read(name)
+            enc = "utf-16" if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else "utf-8"
+            m = re.search(r"DriverVer\s*=\s*(\d{1,2})/(\d{1,2})/(\d{4})\s*,\s*([\d.]+)", raw.decode(enc, errors="replace"), re.I)
+            if m:
+                mo, da, yr, ver = m.groups()
+                info = {"version": ver, "date": f"{yr}-{int(mo):02d}-{int(da):02d}", "inf": name.rsplit("/", 1)[-1]}
+                break
+    except Exception:  # noqa: BLE001
+        return None
+    cache[key] = info or {}
+    try:
+        cache_path.write_text(json.dumps(cache, ensure_ascii=False, indent=1), encoding="utf-8")
+    except OSError:
+        pass
+    return info
+
+
 def _words(s: str) -> set[str]:
     import re
 
@@ -347,6 +422,7 @@ def check_item(item: Item, browser: Browser) -> Item:
         if dev:
             # sürüm numarası olmayan kalemlerde sürücü tarihi karşılaştırılır
             item.installed = dev["date"] if item.anchor.get("shape") == "date" else dev["version"]
+            item.installed_dev_version = dev["version"]
     item.last_checked = datetime.now().isoformat(timespec="seconds")
     p = probe(item.url, browser, need_chrome_if_empty=False)
     item.via = p.page.via if p.page else ""
@@ -380,5 +456,16 @@ def check_item(item: Item, browser: Browser) -> Item:
     item.link = chosen.link
     item.message = ""
     item.state = "new"
+    update_package_info(item)
     item.recompute_state()
     return item
+
+
+def update_package_info(item: Item):
+    """Tarihle takip edilen, Aygıt Yöneticisi'ne bağlı sürücülerde paketin içindeki sürümü oku."""
+    item.pkg_version = item.pkg_date = ""
+    if not (item.installed_device and item.anchor.get("shape") == "date" and item.link):
+        return
+    info = package_driver_info(item.link, item.name + " " + item.installed_device, item.latest)
+    if info:
+        item.pkg_version, item.pkg_date = info["version"], info["date"]

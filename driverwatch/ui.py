@@ -431,6 +431,7 @@ class ItemDialog(QDialog):
                 if dev:
                     info = system_devices().get(dev, {})
                     it.installed_device = dev
+                    it.installed_dev_version = info.get("version", "")
                     it.installed = info.get("date", "") if c.by_date else info.get("version", "")
             it.anchor = anchor_from(c)
             it.latest, it.latest_date, it.link = c.version, c.date, c.link
@@ -446,6 +447,7 @@ class ItemDialog(QDialog):
         item.installed_auto = kind == "bios"
         item.installed_app = prog if kind == "app" else ""
         item.installed_device = prog if kind == "device" else ""
+        item.installed_dev_version = system_devices().get(prog, {}).get("version", "") if kind == "device" else ""
         c = self._main_candidate()
         if c is not None and c is not self._current() and not self.name.isModified():
             item.name = self._title(c) or item.name
@@ -463,6 +465,8 @@ class ItemDialog(QDialog):
         elif self.result_probe and self.result_probe.blocked:
             item.state, item.message = "blocked", self.result_probe.error
         item.recompute_state()
+        if item.installed_device and c is not None and c.by_date and c.link.lower().split("?")[0].endswith(".zip"):
+            item.state = "new"  # paketin içi kontrolde okununca karar verilir; tarihe bakıp yanlış uyarı verme
         return item
 
     def done(self, r):
@@ -506,6 +510,8 @@ class Card(QFrame):
         row.setSpacing(12)
         by_date = item.anchor.get("shape") == "date"
         inst_txt = (fmt_date(item.installed) if by_date else item.installed) or "—"
+        if by_date and item.pkg_version and item.installed_dev_version:
+            inst_txt = item.installed_dev_version
         inst_sub = (
             "bilgisayardan okundu" if item.installed_auto
             else "Windows'tan okundu" if item.installed_app
@@ -516,12 +522,20 @@ class Card(QFrame):
             ("YÜKLÜ SÜRÜCÜNÜN TARİHİ" if item.installed_device else "YÜKLEDİĞİNİZ DOSYANIN TARİHİ")
             if by_date else "YÜKLÜ SÜRÜM"
         )
+        if by_date and item.pkg_version and item.installed_dev_version:
+            cap = "YÜKLÜ SÜRÜCÜ"
+            inst_sub = f"sürücü tarihi {fmt_date(item.installed)} · Aygıt Yöneticisi"
         row.addWidget(self._vbox(cap, inst_txt, inst_sub, C["text"]))
         arrow = QLabel("→")
         arrow.setStyleSheet(f"font-size:20pt; color:{fg if state=='update' else C['muted']};")
         row.addWidget(arrow)
         latest_color = C["red"] if state == "update" else (C["green"] if state == "ok" else C["text"])
-        if by_date:
+        if by_date and item.pkg_version:
+            # sitedeki paketin içindeki sürücüyle, bilgisayardaki sürücü karşılaştırıldı
+            row.addWidget(self._vbox("SİTEDEKİ PAKETİN SÜRÜCÜSÜ", item.pkg_version,
+                                     f"sürücü tarihi {fmt_date(item.pkg_date)} · paket yayını {fmt_date(item.latest)}",
+                                     latest_color))
+        elif by_date:
             row.addWidget(self._vbox("SİTEDEKİ EN YENİ TARİH", fmt_date(item.latest) or "—",
                                      "sürüm numarası yok, tarihle takip", latest_color))
         else:
@@ -763,11 +777,13 @@ class MainWindow(QMainWindow):
         dlg = ItemDialog(self, url)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             item = dlg.apply_to(Item(url=url))
-            self.store.items.append(item)
-            self.store.items.extend(dlg.extra_items())
+            new = [item] + dlg.extra_items()
+            self.store.items.extend(new)
             self.store.save()
             self.url.clear()
             self.render()
+            if any(i.installed_device for i in new):
+                self.check([i.id for i in new])
 
     def edit(self, item_id: str):
         item = self.store.get(item_id)
