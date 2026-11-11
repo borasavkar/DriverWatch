@@ -15,7 +15,8 @@ from PyQt6.QtWidgets import (
 
 from . import __version__
 from .core import (
-    KINDS, Item, Probe, Store, check_item, guess_kind, installed_programs, probe, suggest_program, system_bios,
+    KINDS, Item, Probe, Store, check_item, guess_kind, installed_programs, probe, suggest_device, suggest_program,
+    system_bios, system_devices,
 )
 from .extract import find_dates, title_for
 from .extract import anchor_from, is_newer, same_version
@@ -101,6 +102,7 @@ class CheckWorker(QThread):
 
     def run(self):
         installed_programs(refresh=True)  # kurulumdan sonra yeni sürüm görünsün
+        system_devices(refresh=True)
         browser = Browser(allow_identity=bool(self.store.settings.get("identity_fallback", True)))
         try:
             for item_id in self.ids:
@@ -128,6 +130,7 @@ class ProbeWorker(QThread):
     def run(self):
         browser = Browser(allow_identity=self.allow_identity)
         try:
+            system_devices()  # Aygıt Yöneticisi listesi sayfa okunurken hazırlansın
             res = probe(self.url, browser)
         except Exception as e:  # noqa: BLE001
             res = Probe(error=f"Beklenmeyen hata: {e}")
@@ -206,6 +209,7 @@ class ItemDialog(QDialog):
             self._select_source("bios", "")
         elif item and item.installed_app:
             self._select_source("app", item.installed_app)
+        self._devices_added = False
         self.manual_latest = QLineEdit(item.latest if item else "")
         self.manual_latest.setPlaceholderText("Site engelliyorsa sitede gördüğünüz en yeni sürümü buraya yazabilirsiniz")
         g2.addWidget(QLabel("Yüklü sürüm"), 0, 0)
@@ -271,6 +275,10 @@ class ItemDialog(QDialog):
             self.installed.setText(system_bios().get("version", ""))
         elif kind == "app":
             self.installed.setText(installed_programs().get(name, ""))
+        elif kind == "device":
+            dev = system_devices().get(name, {})
+            c = self._current()
+            self.installed.setText(fmt_date(dev.get("date", "")) if (c and c.by_date) else dev.get("version", ""))
         auto = kind != "manual"
         self.installed.setReadOnly(auto)
         self.btn_same.setEnabled(not auto)
@@ -279,9 +287,26 @@ class ItemDialog(QDialog):
         """Seçilen kalemin adına uyan yüklü programı öner (kullanıcı kendisi seçmediyse)."""
         if self._source_touched or self.kind.currentText() == "BIOS":
             return
-        prog = suggest_program(self._title(c) or self.name.text(), "" if c.by_date else c.version)
-        if not (prog and self._select_source("app", prog)):
-            self._select_source("manual", "")
+        title = self._title(c) or self.name.text()
+        prog = suggest_program(title, "" if c.by_date else c.version)
+        if prog and self._select_source("app", prog):
+            return
+        # firmware / BIOS sürücü değildir; Aygıt Yöneticisi önerisi yalnızca sürücü ve yazılımlar için
+        if self.kind.currentText() in ("Sürücü", "Yazılım", "Diğer") and c.shape != "label":
+            dev = suggest_device(title)
+            if dev and self._select_source("device", dev):
+                return
+        self._select_source("manual", "")
+
+    def _add_devices(self):
+        if self._devices_added:
+            return
+        self._devices_added = True
+        for dev, info in system_devices().items():
+            when = fmt_date(info.get("date", ""))
+            self.source.addItem(f"Aygıt Yöneticisi: {dev} — {info.get('version', '')} ({when})", ("device", dev))
+        if self.item and self.item.installed_device:
+            self._select_source("device", self.item.installed_device)
 
     def _mark_same(self):
         c = self._current()
@@ -326,9 +351,11 @@ class ItemDialog(QDialog):
         if t:
             self.name.setText(t)
         self._suggest_source(c)
+        self._on_source()
 
     def _on_probe(self, res: Probe):
         self.result_probe = res
+        self._add_devices()
         if res.page and not self.name.text().strip():
             self.name.setText((res.page.title or "")[:80])
             if self.kind.currentText() == "Diğer":
@@ -399,6 +426,12 @@ class ItemDialog(QDialog):
             prog = "" if c.by_date else suggest_program(it.name, c.version)
             if prog:
                 it.installed_app, it.installed = prog, installed_programs().get(prog, "")
+            elif it.kind in ("Sürücü", "Yazılım", "Diğer") and c.shape != "label":
+                dev = suggest_device(it.name)
+                if dev:
+                    info = system_devices().get(dev, {})
+                    it.installed_device = dev
+                    it.installed = info.get("date", "") if c.by_date else info.get("version", "")
             it.anchor = anchor_from(c)
             it.latest, it.latest_date, it.link = c.version, c.date, c.link
             it.last_checked = datetime.now().isoformat(timespec="seconds")
@@ -412,6 +445,7 @@ class ItemDialog(QDialog):
         kind, prog = self.source.currentData()
         item.installed_auto = kind == "bios"
         item.installed_app = prog if kind == "app" else ""
+        item.installed_device = prog if kind == "device" else ""
         c = self._main_candidate()
         if c is not None and c is not self._current() and not self.name.isModified():
             item.name = self._title(c) or item.name
@@ -475,9 +509,14 @@ class Card(QFrame):
         inst_sub = (
             "bilgisayardan okundu" if item.installed_auto
             else "Windows'tan okundu" if item.installed_app
+            else "Aygıt Yöneticisi'nden okundu" if item.installed_device
             else ("girilmedi" if not item.installed else "")
         )
-        row.addWidget(self._vbox("YÜKLEDİĞİNİZ DOSYANIN TARİHİ" if by_date else "YÜKLÜ SÜRÜM", inst_txt, inst_sub, C["text"]))
+        cap = (
+            ("YÜKLÜ SÜRÜCÜNÜN TARİHİ" if item.installed_device else "YÜKLEDİĞİNİZ DOSYANIN TARİHİ")
+            if by_date else "YÜKLÜ SÜRÜM"
+        )
+        row.addWidget(self._vbox(cap, inst_txt, inst_sub, C["text"]))
         arrow = QLabel("→")
         arrow.setStyleSheet(f"font-size:20pt; color:{fg if state=='update' else C['muted']};")
         row.addWidget(arrow)
@@ -522,7 +561,7 @@ class Card(QFrame):
                 b_dl.setObjectName("dl")
             b_dl.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(item.link)))
             bot.addWidget(b_dl)
-        if state in ("update", "noinstalled") and item.latest and not item.installed_auto and not item.installed_app:
+        if state in ("update", "noinstalled") and item.latest and not item.installed_auto and not item.installed_app and not item.installed_device:
             b_inst = QPushButton("Yükledim ✓")
             b_inst.setObjectName("good")
             b_inst.setToolTip(f"Yüklü sürümü {item.latest} olarak işaretle")

@@ -33,6 +33,7 @@ class Item:
     installed: str = ""
     installed_auto: bool = False  # BIOS: yüklü sürümü bilgisayardan oku
     installed_app: str = ""  # Windows "Yüklü uygulamalar" listesindeki ad; sürüm her kontrolde oradan okunur
+    installed_device: str = ""  # Aygıt Yöneticisi'ndeki aygıt adı; sürücü sürümü/tarihi oradan okunur
     via: str = ""  # son kontrolde sayfa nasıl okundu: http | chrome | chrome-kimlik
     latest: str = ""
     latest_date: str = ""
@@ -200,6 +201,63 @@ def installed_programs(refresh: bool = False) -> dict[str, str]:
     return _prog_cache
 
 
+_dev_cache: dict[str, dict] | None = None
+
+
+def system_devices(refresh: bool = False) -> dict[str, dict]:
+    """Aygıt Yöneticisi'ndeki (Microsoft dışı) sürücüler: {aygıt adı: {version, date, provider}}."""
+    global _dev_cache
+    if _dev_cache is not None and not refresh:
+        return _dev_cache
+    out: dict[str, dict] = {}
+    if os.name == "nt":
+        ps = (
+            "Get-CimInstance Win32_PnPSignedDriver | Where-Object { $_.DeviceName -and $_.DriverProviderName "
+            "-and $_.DriverProviderName -ne 'Microsoft' } | ForEach-Object { [pscustomobject]@{ n=$_.DeviceName; "
+            "v=$_.DriverVersion; p=$_.DriverProviderName; d=$(if ($_.DriverDate) { $_.DriverDate.ToString('yyyy-MM-dd') } else { '' }) } } "
+            "| ConvertTo-Json -Compress"
+        )
+        try:
+            raw = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+                capture_output=True, text=True, encoding="utf-8", timeout=40,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            ).stdout
+            rows = json.loads(raw) if raw.strip() else []
+            if isinstance(rows, dict):
+                rows = [rows]
+            for r in rows:
+                name = (r.get("n") or "").strip()
+                if not name:
+                    continue
+                entry = {"version": (r.get("v") or "").strip(), "date": r.get("d") or "", "provider": r.get("p") or ""}
+                # aynı adlı birden fazla aygıt varsa en yeni sürücü tarihlisini tut
+                if name not in out or entry["date"] > out[name]["date"]:
+                    out[name] = entry
+        except Exception:  # noqa: BLE001
+            pass
+    _dev_cache = dict(sorted(out.items(), key=lambda kv: kv[0].lower()))
+    return _dev_cache
+
+
+def suggest_device(name: str, devices: dict[str, dict] | None = None) -> str:
+    """'ASUS_XG27ACSR_WHQL_Driver' → 'ROG STRIX XG27ACSR' (model numarası eşleşmesi)."""
+    devices = system_devices() if devices is None else devices
+    want = _words(name.replace("_", " "))
+    # model numarası gibi (harf + rakam, en az 5 karakter) sözcükler tek başına yeterli
+    models = {w for w in want if len(w) >= 5 and any(ch.isdigit() for ch in w) and any(ch.isalpha() for ch in w)}
+    best, best_key = "", (0, 0)
+    for dev in devices:
+        have = _words(dev)
+        common = want & have
+        if not (common & models or len(common) >= 2):
+            continue
+        key = (len(common & models), len(common))
+        if key > best_key:
+            best, best_key = dev, key
+    return best
+
+
 def _words(s: str) -> set[str]:
     import re
 
@@ -284,6 +342,11 @@ def check_item(item: Item, browser: Browser) -> Item:
         v = installed_programs().get(item.installed_app)
         if v:
             item.installed = v
+    elif item.installed_device:
+        dev = system_devices().get(item.installed_device)
+        if dev:
+            # sürüm numarası olmayan kalemlerde sürücü tarihi karşılaştırılır
+            item.installed = dev["date"] if item.anchor.get("shape") == "date" else dev["version"]
     item.last_checked = datetime.now().isoformat(timespec="seconds")
     p = probe(item.url, browser, need_chrome_if_empty=False)
     item.via = p.page.via if p.page else ""
