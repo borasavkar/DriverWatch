@@ -15,7 +15,8 @@ from PyQt6.QtWidgets import (
 
 from . import __version__
 from .core import (
-    KINDS, Item, Probe, Store, check_item, guess_kind, installed_programs, probe, suggest_device, suggest_program,
+    KINDS, Item, Probe, Store, check_item, guess_kind, installed_info, installed_programs, probe, suggest_device,
+    suggest_program,
     system_bios, system_devices,
 )
 from .extract import find_dates, title_for
@@ -42,6 +43,7 @@ STATES = {
     "new": ("HENÜZ KONTROL EDİLMEDİ", C["gray"], C["gray_bg"], 4),
     "ok": ("GÜNCEL", C["green"], C["green_bg"], 5),
     "checking": ("KONTROL EDİLİYOR…", C["blue"], C["blue_bg"], 6),
+    "nocompare": ("KARŞILAŞTIRILAMADI", C["amber"], C["amber_bg"], 2),
 }
 
 QSS = f"""
@@ -408,10 +410,11 @@ class ItemDialog(QDialog):
 
     @staticmethod
     def _norm_installed(text: str, c) -> str:
+        """Elle yazılan değer tümüyle bir tarihse ISO'ya çevir (tarih tarihle karşılaştırılsın)."""
         text = text.strip()
-        if c is not None and c.by_date and text:
+        if text:
             ds = find_dates(text)
-            if ds:
+            if ds and (c is not None and c.by_date or (ds[0][0] == 0 and ds[0][1] == len(text))):
                 return ds[0][2].isoformat()
         return text
 
@@ -423,16 +426,12 @@ class ItemDialog(QDialog):
             if c is main:
                 continue
             it = Item(url=self.url, name=self._title(c) or self.name.text().strip(), kind=self.kind.currentText())
-            prog = "" if c.by_date else suggest_program(it.name, c.version)
+            prog = suggest_program(it.name, "" if c.by_date else c.version)
             if prog:
-                it.installed_app, it.installed = prog, installed_programs().get(prog, "")
+                it.installed_app = prog
             elif it.kind in ("Sürücü", "Yazılım", "Diğer") and c.shape != "label":
-                dev = suggest_device(it.name)
-                if dev:
-                    info = system_devices().get(dev, {})
-                    it.installed_device = dev
-                    it.installed_dev_version = info.get("version", "")
-                    it.installed = info.get("date", "") if c.by_date else info.get("version", "")
+                it.installed_device = suggest_device(it.name)
+            installed_info(it)
             it.anchor = anchor_from(c)
             it.latest, it.latest_date, it.link = c.version, c.date, c.link
             it.last_checked = datetime.now().isoformat(timespec="seconds")
@@ -452,6 +451,8 @@ class ItemDialog(QDialog):
         if c is not None and c is not self._current() and not self.name.isModified():
             item.name = self._title(c) or item.name
         item.installed = self._norm_installed(self.installed.text(), c)
+        item.installed_date = ""
+        installed_info(item)  # kaynak seçildiyse gerçek sürümü ve tarihini oradan al
         if c:
             item.anchor = anchor_from(c)
             item.latest, item.latest_date, item.link = c.version, c.date, c.link
@@ -505,44 +506,61 @@ class Card(QFrame):
         top.addWidget(pill(label, fg, bg))
         v.addLayout(top)
 
-        # sürümler
+        # sürümler: sürüm sürümle, tarih tarihle karşılaştırılır
         row = QHBoxLayout()
         row.setSpacing(12)
-        by_date = item.anchor.get("shape") == "date"
-        inst_txt = (fmt_date(item.installed) if by_date else item.installed) or "—"
-        if by_date and item.pkg_version and item.installed_dev_version:
-            inst_txt = item.installed_dev_version
-        inst_sub = (
+        iv, idt = item.installed_pair()
+        sv, sd = item.site_pair()
+        date_word = (
+            "BIOS tarihi" if item.installed_auto
+            else "kurulum tarihi" if item.installed_app
+            else "sürücü tarihi" if item.installed_device
+            else "tarih"
+        )
+        source = (
             "bilgisayardan okundu" if item.installed_auto
             else "Windows'tan okundu" if item.installed_app
             else "Aygıt Yöneticisi'nden okundu" if item.installed_device
-            else ("girilmedi" if not item.installed else "")
+            else ("girilmedi" if not (iv or idt) else "elle girildi")
         )
-        cap = (
-            ("YÜKLÜ SÜRÜCÜNÜN TARİHİ" if item.installed_device else "YÜKLEDİĞİNİZ DOSYANIN TARİHİ")
-            if by_date else "YÜKLÜ SÜRÜM"
-        )
-        if by_date and item.pkg_version and item.installed_dev_version:
-            cap = "YÜKLÜ SÜRÜCÜ"
-            inst_sub = f"sürücü tarihi {fmt_date(item.installed)} · Aygıt Yöneticisi"
-        row.addWidget(self._vbox(cap, inst_txt, inst_sub, C["text"]))
+        inst_sub = " · ".join(x for x in ((f"{date_word} {fmt_date(idt)}" if iv and idt else ""), source) if x)
+        row.addWidget(self._vbox("YÜKLÜ SÜRÜM" if iv or not idt else "YÜKLÜ OLANIN TARİHİ",
+                                 iv or fmt_date(idt) or "—", inst_sub, C["text"]))
         arrow = QLabel("→")
         arrow.setStyleSheet(f"font-size:20pt; color:{fg if state=='update' else C['muted']};")
         row.addWidget(arrow)
         latest_color = C["red"] if state == "update" else (C["green"] if state == "ok" else C["text"])
-        if by_date and item.pkg_version:
-            # sitedeki paketin içindeki sürücüyle, bilgisayardaki sürücü karşılaştırıldı
-            row.addWidget(self._vbox("SİTEDEKİ PAKETİN SÜRÜCÜSÜ", item.pkg_version,
-                                     f"sürücü tarihi {fmt_date(item.pkg_date)} · paket yayını {fmt_date(item.latest)}",
-                                     latest_color))
-        elif by_date:
-            row.addWidget(self._vbox("SİTEDEKİ EN YENİ TARİH", fmt_date(item.latest) or "—",
-                                     "sürüm numarası yok, tarihle takip", latest_color))
+        if item.pkg_version:
+            site_cap = "SİTEDEKİ PAKETİN SÜRÜCÜSÜ"
+            site_sub = f"sürücü tarihi {fmt_date(item.pkg_date)} · paket yayını {fmt_date(item.latest)}"
+        elif sv:
+            site_cap, site_sub = "SİTEDEKİ EN YENİ", (f"yayın: {fmt_date(sd)}" if sd else "")
         else:
-            row.addWidget(self._vbox("SİTEDEKİ EN YENİ", item.latest or "—",
-                                     ("yayın: " + fmt_date(item.latest_date)) if item.latest_date else "", latest_color))
+            site_cap, site_sub = "SİTEDEKİ EN YENİ", "sitede sürüm numarası yok, yayın tarihi"
+        row.addWidget(self._vbox(site_cap, sv or fmt_date(sd) or "—", site_sub, latest_color))
         row.addStretch(1)
         v.addLayout(row)
+
+        # neye göre karar verildi
+        basis = ""
+        if not checking:
+            if item.compared == "version":
+                basis = "Sürüm numaraları karşılaştırıldı."
+            elif item.compared == "date":
+                basis = f"Sürüm numarası olmadığı için tarihler karşılaştırıldı: sitedeki {fmt_date(sd)}, yüklü olanın {date_word} {fmt_date(idt)}."
+            elif item.state == "nocompare":
+                basis = (
+                    "Karşılaştırılamadı: sitede yalnızca tarih var, yüklü olanın ise yalnızca sürüm numarası biliniyor. "
+                    "“Düzenle”den yüklü dosyanın tarihini yazın ya da tarih bilgisi olan bir kaynak seçin."
+                    if sd and not sv else
+                    "Karşılaştırılamadı: sitede sürüm numarası var, yüklü olanın ise yalnızca tarihi biliniyor. "
+                    "“Düzenle”den yüklü sürümü yazın."
+                )
+        if basis:
+            b = QLabel(basis)
+            b.setWordWrap(True)
+            b.setStyleSheet(f"color:{C['amber'] if item.state == 'nocompare' else C['muted']}; font-size:9pt;")
+            v.addWidget(b)
 
         if item.message and not checking:
             m = QLabel(item.message)
@@ -575,7 +593,7 @@ class Card(QFrame):
                 b_dl.setObjectName("dl")
             b_dl.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(item.link)))
             bot.addWidget(b_dl)
-        if state in ("update", "noinstalled") and item.latest and not item.installed_auto and not item.installed_app and not item.installed_device:
+        if state in ("update", "noinstalled", "nocompare") and item.latest and not item.installed_auto and not item.installed_app and not item.installed_device:
             b_inst = QPushButton("Yükledim ✓")
             b_inst.setObjectName("good")
             b_inst.setToolTip(f"Yüklü sürümü {item.latest} olarak işaretle")
@@ -811,7 +829,8 @@ class MainWindow(QMainWindow):
     def mark_installed(self, item_id: str):
         item = self.store.get(item_id)
         if item and item.latest:
-            item.installed = item.latest
+            sv, sd = item.site_pair()
+            item.installed, item.installed_date = (sv or sd), sd
             item.recompute_state()
             self.store.save()
             self.render()

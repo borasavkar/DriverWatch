@@ -172,6 +172,36 @@ class PackageCompareTests(unittest.TestCase):
         self.assertEqual(it.state, "update")
 
 
+class CompareRuleTests(unittest.TestCase):
+    """Sürüm sürümle, tarih tarihle; çift yoksa karar verilmez."""
+
+    def item(self, **kw):
+        from driverwatch.core import Item
+
+        return Item(url="x", **kw)
+
+    def test_date_only_site_vs_installed_app_uses_install_date(self):
+        # DisplayWidget: sitede yalnızca 09.01.2025, bilgisayarda 1.5.2 (05.11.2026'da kuruldu)
+        it = self.item(latest="2025-01-09", latest_date="2025-01-09", anchor={"shape": "date"},
+                       installed="1.5.2", installed_date="2026-11-05", installed_app="DisplayWidget Center")
+        it.recompute_state()
+        self.assertEqual((it.state, it.compared), ("ok", "date"))
+        it.latest = it.latest_date = "2026-12-01"
+        it.recompute_state()
+        self.assertEqual((it.state, it.compared), ("update", "date"))
+
+    def test_version_beats_date(self):
+        it = self.item(latest="8.09.28.1124", latest_date="2026-10-21", installed="8.09.28.1124",
+                       installed_date="2026-01-01")
+        it.recompute_state()
+        self.assertEqual((it.state, it.compared), ("ok", "version"))
+
+    def test_no_matching_pair_is_not_guessed(self):
+        it = self.item(latest="2025-01-09", anchor={"shape": "date"}, installed="1.5.2")
+        it.recompute_state()
+        self.assertEqual(it.state, "nocompare")
+
+
 class ExtractTests(unittest.TestCase):
     def test_amd_finds_chipset_first_and_skips_file_size(self):
         c = extract_candidates(AMD.format(chip="8.09.28.1124", chipdate="2026-10-21"))

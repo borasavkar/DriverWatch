@@ -30,7 +30,8 @@ class Item:
     url: str
     name: str = ""
     kind: str = "Sürücü"
-    installed: str = ""
+    installed: str = ""  # yüklü sürüm (ya da elle girilmiş tarih)
+    installed_date: str = ""  # yüklü olanın tarihi (sürücü tarihi, BIOS tarihi ya da kurulum tarihi), ISO
     installed_auto: bool = False  # BIOS: yüklü sürümü bilgisayardan oku
     installed_app: str = ""  # Windows "Yüklü uygulamalar" listesindeki ad; sürüm her kontrolde oradan okunur
     installed_device: str = ""  # Aygıt Yöneticisi'ndeki aygıt adı; sürücü sürümü/tarihi oradan okunur
@@ -42,34 +43,62 @@ class Item:
     latest_date: str = ""
     link: str = ""
     anchor: dict = field(default_factory=dict)
-    state: str = "new"  # new | ok | update | noinstalled | blocked | error | lost
+    state: str = "new"  # new | ok | update | noinstalled | nocompare | blocked | error | lost
+    compared: str = ""  # son karar neye göre verildi: "version" | "date" | ""
     message: str = ""
     last_checked: str = ""
     added: str = field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:10])
 
+    # -- karşılaştırma: sürüm sürümle, tarih tarihle; çift yoksa karar verilmez
+
+    def installed_pair(self) -> tuple[str, str]:
+        """(yüklü sürüm, yüklü tarih)."""
+        ver, dt = self.installed, self.installed_date
+        if is_iso_date(ver):
+            ver, dt = "", ver  # tarih olarak girilmiş
+        if self.installed_device and self.installed_dev_version:
+            ver = self.installed_dev_version
+        return ver, dt
+
+    def site_pair(self) -> tuple[str, str]:
+        """(sitedeki sürüm, sitedeki tarih). Paketin içi okunduysa paketteki sürücü esas alınır."""
+        if self.pkg_version:
+            return self.pkg_version, self.pkg_date
+        if self.anchor.get("shape") == "date" or is_iso_date(self.latest):
+            return "", self.latest
+        return self.latest, self.latest_date
+
     def recompute_state(self):
         if self.state in ("blocked", "error", "lost") and not self.latest:
             return
-        # Sitedeki tarih paketin yayın tarihidir; içindeki sürücü aynı olabilir. Paketin içi okunabildiyse
-        # karşılaştırma bilgisayardaki sürücü sürümüyle yapılır.
-        if self.pkg_version and self.installed_dev_version:
-            if is_newer(self.pkg_version, self.installed_dev_version):
+        sv, sd = self.site_pair()
+        iv, idt = self.installed_pair()
+        self.compared = ""
+        if not (sv or sd):
+            self.state = "new"
+        elif not (iv or idt):
+            self.state = "noinstalled"
+        elif sv and iv:
+            self.compared = "version"
+            if is_newer(sv, iv):
                 self.state = "update"
-            elif same_version(self.pkg_version, self.installed_dev_version) and self.pkg_date and self.installed \
-                    and self.pkg_date > self.installed:
-                self.state = "update"  # aynı numara, daha yeni tarihli sürücü
+            elif same_version(sv, iv) and self.pkg_version and sd and idt and sd > idt:
+                self.state = "update"  # paketteki sürücü aynı numaralı ama daha yeni tarihli
             else:
                 self.state = "ok"
-            return
-        if not self.latest:
-            self.state = "new"
-        elif not self.installed:
-            self.state = "noinstalled"
-        elif is_newer(self.latest, self.installed):
-            self.state = "update"
-        elif same_version(self.latest, self.installed) or not is_newer(self.latest, self.installed):
-            self.state = "ok"
+        elif sd and idt:
+            self.compared = "date"
+            self.state = "update" if sd > idt else "ok"
+        else:
+            # ör. sitede yalnızca tarih var, bilgisayarda yalnızca sürüm numarası
+            self.state = "nocompare"
+
+
+def is_iso_date(s: str) -> bool:
+    import re
+
+    return bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", s or ""))
 
 
 class Store:
@@ -211,8 +240,40 @@ def installed_programs(refresh: bool = False) -> dict[str, str]:
                     continue
                 if name and ver and name not in out:
                     out[name] = ver
+                    try:
+                        d = str(winreg.QueryValueEx(sub, "InstallDate")[0]).strip()  # YYYYMMDD
+                        if len(d) == 8 and d.isdigit():
+                            _prog_dates[name] = f"{d[:4]}-{d[4:6]}-{d[6:]}"
+                    except OSError:
+                        pass
     _prog_cache = dict(sorted(out.items(), key=lambda kv: kv[0].lower()))
     return _prog_cache
+
+
+_prog_dates: dict[str, str] = {}
+
+
+def installed_program_date(name: str) -> str:
+    """Programın Windows'a kurulduğu tarih (ISO); kayıtta yoksa boş."""
+    installed_programs()
+    return _prog_dates.get(name, "")
+
+
+def installed_info(item: Item) -> None:
+    """Seçilen kaynaktan (BIOS / yüklü program / Aygıt Yöneticisi) yüklü sürümü ve tarihini oku."""
+    if item.installed_auto:
+        b = system_bios()
+        if b.get("version"):
+            item.installed, item.installed_date = b["version"], b.get("date", "")
+    elif item.installed_app:
+        v = installed_programs().get(item.installed_app)
+        if v:
+            item.installed, item.installed_date = v, installed_program_date(item.installed_app)
+    elif item.installed_device:
+        dev = system_devices().get(item.installed_device)
+        if dev:
+            item.installed, item.installed_date = dev["version"], dev["date"]
+            item.installed_dev_version = dev["version"]
 
 
 _dev_cache: dict[str, dict] | None = None
@@ -409,20 +470,7 @@ def probe(url: str, browser: Browser, need_chrome_if_empty: bool = True) -> Prob
 
 def check_item(item: Item, browser: Browser) -> Item:
     """Kaydı yerinde günceller ve döner."""
-    if item.installed_auto:
-        v = system_bios().get("version")
-        if v:
-            item.installed = v
-    elif item.installed_app:
-        v = installed_programs().get(item.installed_app)
-        if v:
-            item.installed = v
-    elif item.installed_device:
-        dev = system_devices().get(item.installed_device)
-        if dev:
-            # sürüm numarası olmayan kalemlerde sürücü tarihi karşılaştırılır
-            item.installed = dev["date"] if item.anchor.get("shape") == "date" else dev["version"]
-            item.installed_dev_version = dev["version"]
+    installed_info(item)
     item.last_checked = datetime.now().isoformat(timespec="seconds")
     p = probe(item.url, browser, need_chrome_if_empty=False)
     item.via = p.page.via if p.page else ""
