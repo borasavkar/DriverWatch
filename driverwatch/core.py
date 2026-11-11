@@ -12,6 +12,7 @@ from pathlib import Path
 
 from .extract import Candidate, anchor_from, page_candidates, is_newer, pick_tracked, same_version, title_for
 from .fetch import BlockedError, Browser, FetchError, Page, fetch_http
+from .i18n import _
 
 KINDS = ["BIOS", "Sürücü", "Firmware", "Yazılım", "Diğer"]
 
@@ -459,11 +460,11 @@ def probe(url: str, browser: Browser, need_chrome_if_empty: bool = True) -> Prob
             if not p.candidates:
                 p.error = str(e) if not http_err else f"{http_err}; {e}"
     if not p.candidates and not p.error and not p.blocked:
-        p.error = "Sayfada sürüm numarası bulunamadı"
+        p.error = _("No version number found on the page")
     if p.blocked:
-        p.error = (
-            "Site otomatik kontrole izin vermiyor. “Sayfayı aç” ile bakıp gördüğünüz sürümü "
-            "“Düzenle” → “En yeni (elle)” alanına yazabilirsiniz."
+        p.error = _(
+            "The site does not allow automatic checks. Look with “Open page” and type the version you see into "
+            "“Edit” → “Latest (manual)”."
         )
     return p
 
@@ -493,7 +494,7 @@ def check_item(item: Item, browser: Browser) -> Item:
                 chosen = None
     if chosen is None:
         item.state = "lost"
-        item.message = "Takip edilen sürüm sayfada bulunamadı; sayfa değişmiş olabilir. Düzenle'den yeniden seçin."
+        item.message = _("The tracked version was not found on the page; the page may have changed. Pick it again under “Edit”.")
         return item
     if not item.anchor:
         item.anchor = anchor_from(chosen)

@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 
 import requests
 
+from .i18n import _
+
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
@@ -137,12 +139,12 @@ def fetch_http(url: str, timeout: int = 20) -> Page:
             timeout=timeout,
         )
     except requests.RequestException as e:
-        raise FetchError(f"Bağlantı kurulamadı: {e.__class__.__name__}") from e
+        raise FetchError(_("Could not connect: {e}", e=e.__class__.__name__)) from e
     title, text, links = _html_to_text(r.text)
     if r.status_code in (401, 403, 429) or _is_blocked(text):
-        raise BlockedError(f"Site isteği reddetti (HTTP {r.status_code})")
+        raise BlockedError(_("The site refused the request (HTTP {c})", c=r.status_code))
     if r.status_code >= 400:
-        raise FetchError(f"Sayfa açılamadı (HTTP {r.status_code})")
+        raise FetchError(_("The page could not be opened (HTTP {c})", c=r.status_code))
     from urllib.parse import urljoin
 
     links = [(t, urljoin(r.url, h)) for t, h in links if not h.startswith(("#", "javascript:", "mailto:"))]
@@ -261,7 +263,7 @@ class Browser:
             d = webdriver.Chrome(options=o)
         except Exception as e:  # noqa: BLE001
             raise FetchError(
-                "Chrome başlatılamadı. Google Chrome kurulu mu? (" + str(e).splitlines()[0][:120] + ")"
+                _("Chrome could not be started. Is Google Chrome installed? ({e})", e=str(e).splitlines()[0][:120])
             ) from e
         d.set_page_load_timeout(45)
         if not self._version:
@@ -292,7 +294,7 @@ class Browser:
         try:
             d.get(url)
         except Exception as e:  # noqa: BLE001
-            raise FetchError("Sayfa zaman aşımına uğradı") from e
+            raise FetchError(_("The page timed out")) from e
         # İçerik JavaScript ile sonradan yükleniyorsa metin durulana kadar bekle
         last, stable, t0 = -1, 0, time.time()
         while time.time() - t0 < settle:
@@ -323,7 +325,7 @@ class Browser:
             "return Array.from(document.querySelectorAll('a[href]')).map(a=>[((a.innerText||'')+' '+(a.getAttribute('aria-label')||'')).trim(), a.href]);"
         ) or []
         if _is_blocked(text):
-            raise BlockedError("Site otomatik kontrole izin vermiyor")
+            raise BlockedError(_("The site does not allow automatic checks"))
         try:
             src = d.page_source or ""
             # Sayfanın arka planda kendisinin çağırdığı veri adreslerini (ör. ASUS GetPDBIOS) de oku:

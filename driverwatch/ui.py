@@ -1,11 +1,11 @@
-"""PyQt6 arayüzü."""
+"""PyQt6 user interface."""
 from __future__ import annotations
 
 import sys
 from datetime import date, datetime
 from pathlib import Path
 
-from PyQt6.QtCore import QObject, QThread, QTimer, Qt, QUrl, pyqtSignal
+from PyQt6.QtCore import QThread, QTimer, Qt, QUrl, pyqtSignal
 from PyQt6.QtGui import QDesktopServices, QFont, QIcon
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFrame,
@@ -16,14 +16,13 @@ from PyQt6.QtWidgets import (
 from . import __version__
 from .core import (
     KINDS, Item, Probe, Store, check_item, guess_kind, installed_info, installed_programs, probe, suggest_device,
-    suggest_program,
-    system_bios, system_devices,
+    suggest_program, system_bios, system_devices,
 )
-from .extract import find_dates, title_for
-from .extract import anchor_from, is_newer, same_version
+from .extract import anchor_from, find_dates, title_for
 from .fetch import Browser
+from .i18n import LANGS, _, kind_label, lang, set_lang
 
-# ---------------------------------------------------------------- görünüm
+# ---------------------------------------------------------------- look
 
 C = {
     "bg": "#14171c", "panel": "#1d2128", "panel2": "#252a33", "line": "#323844",
@@ -33,18 +32,30 @@ C = {
     "gray": "#8b95a5", "gray_bg": "#2a303a",
 }
 
-STATES = {
-    # durum: (rozet metni, renk, arka plan, sıralama)
-    "update": ("YENİ SÜRÜM VAR", C["red"], C["red_bg"], 0),
-    "lost": ("SÜRÜM BULUNAMADI", C["amber"], C["amber_bg"], 1),
-    "blocked": ("SİTE ENGELLİYOR", C["amber"], C["amber_bg"], 2),
-    "error": ("KONTROL EDİLEMEDİ", C["amber"], C["amber_bg"], 2),
-    "noinstalled": ("YÜKLÜ SÜRÜM GİRİLMEDİ", C["blue"], C["blue_bg"], 3),
-    "new": ("HENÜZ KONTROL EDİLMEDİ", C["gray"], C["gray_bg"], 4),
-    "ok": ("GÜNCEL", C["green"], C["green_bg"], 5),
-    "checking": ("KONTROL EDİLİYOR…", C["blue"], C["blue_bg"], 6),
-    "nocompare": ("KARŞILAŞTIRILAMADI", C["amber"], C["amber_bg"], 2),
+# Kind tags have their own colours, kept apart from the status colours (red / green / amber)
+KIND_COLORS = {
+    "BIOS": ("#b39dff", "#2a2342"),
+    "Sürücü": ("#4cc3ff", "#13314a"),
+    "Firmware": ("#ff8fc8", "#45203a"),
+    "Yazılım": ("#3fd9c3", "#123b37"),
+    "Diğer": ("#a3acba", "#2a303a"),
 }
+
+
+def states() -> dict:
+    # state: (badge text, colour, background, sort order)
+    return {
+        "update": (_("NEW VERSION AVAILABLE"), C["red"], C["red_bg"], 0),
+        "lost": (_("VERSION NOT FOUND"), C["amber"], C["amber_bg"], 1),
+        "blocked": (_("SITE BLOCKS CHECKS"), C["amber"], C["amber_bg"], 2),
+        "error": (_("COULD NOT CHECK"), C["amber"], C["amber_bg"], 2),
+        "nocompare": (_("CANNOT COMPARE"), C["amber"], C["amber_bg"], 2),
+        "noinstalled": (_("INSTALLED VERSION NOT SET"), C["blue"], C["blue_bg"], 3),
+        "new": (_("NOT CHECKED YET"), C["gray"], C["gray_bg"], 4),
+        "ok": (_("UP TO DATE"), C["green"], C["green_bg"], 5),
+        "checking": (_("CHECKING…"), C["blue"], C["blue_bg"], 6),
+    }
+
 
 QSS = f"""
 * {{ font-family: 'Segoe UI', sans-serif; font-size: 10pt; color: {C['text']}; }}
@@ -70,12 +81,15 @@ QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; }}
 
 
 def fmt_date(iso: str) -> str:
+    """English: 2026-07-13 · Turkish: 13.07.2026."""
     if not iso:
         return ""
     try:
         if "T" in iso:
-            return datetime.fromisoformat(iso).strftime("%d.%m.%Y %H:%M")
-        return date.fromisoformat(iso).strftime("%d.%m.%Y")
+            dt = datetime.fromisoformat(iso)
+            return dt.strftime("%d.%m.%Y %H:%M") if lang() == "tr" else dt.strftime("%Y-%m-%d %H:%M")
+        d = date.fromisoformat(iso)
+        return d.strftime("%d.%m.%Y") if lang() == "tr" else d.isoformat()
     except ValueError:
         return iso
 
@@ -91,7 +105,12 @@ def pill(text: str, fg: str, bg: str, big: bool = True) -> QLabel:
     return lb
 
 
-# ---------------------------------------------------------------- iş parçacıkları
+def kind_pill(kind: str) -> QLabel:
+    fg, bg = KIND_COLORS.get(kind, KIND_COLORS["Diğer"])
+    return pill(kind_label(kind), fg, bg, big=False)
+
+
+# ---------------------------------------------------------------- workers
 
 class CheckWorker(QThread):
     started_item = pyqtSignal(str)
@@ -103,7 +122,7 @@ class CheckWorker(QThread):
         self.store, self.ids = store, ids
 
     def run(self):
-        installed_programs(refresh=True)  # kurulumdan sonra yeni sürüm görünsün
+        installed_programs(refresh=True)  # so a version installed meanwhile shows up
         system_devices(refresh=True)
         browser = Browser(allow_identity=bool(self.store.settings.get("identity_fallback", True)))
         try:
@@ -115,7 +134,7 @@ class CheckWorker(QThread):
                 try:
                     check_item(item, browser)
                 except Exception as e:  # noqa: BLE001
-                    item.state, item.message = "error", f"Beklenmeyen hata: {e}"
+                    item.state, item.message = "error", _("Unexpected error: {e}", e=e)
                 self.done_item.emit(item_id)
         finally:
             browser.close()
@@ -132,30 +151,30 @@ class ProbeWorker(QThread):
     def run(self):
         browser = Browser(allow_identity=self.allow_identity)
         try:
-            system_devices()  # Aygıt Yöneticisi listesi sayfa okunurken hazırlansın
+            system_devices()  # prepare the Device Manager list while the page is read
             res = probe(self.url, browser)
         except Exception as e:  # noqa: BLE001
-            res = Probe(error=f"Beklenmeyen hata: {e}")
+            res = Probe(error=_("Unexpected error: {e}", e=e))
         finally:
             browser.close()
         self.finished_probe.emit(res)
 
 
-# ---------------------------------------------------------------- ekle / düzenle
+# ---------------------------------------------------------------- add / edit
 
 class ItemDialog(QDialog):
-    """Yeni link ekleme ya da mevcut kaydı düzenleme."""
+    """Add a new link or edit an existing item."""
 
     def __init__(self, parent, url: str, item: Item | None = None):
         super().__init__(parent)
         self.url, self.item = url, item
         self.result_probe: Probe | None = None
-        self.setWindowTitle("Kaydı düzenle" if item else "Yeni takip ekle")
+        self.setWindowTitle(_("Edit item") if item else _("Track a new item"))
         self.resize(820, 620)
 
         lay = QVBoxLayout(self)
         lay.setSpacing(10)
-        u = QLabel(f"<span style='color:{C['muted']}'>Sayfa:</span> {url}")
+        u = QLabel(f"<span style='color:{C['muted']}'>{_('Page:')}</span> {url}")
         u.setWordWrap(True)
         u.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         lay.addWidget(u)
@@ -163,25 +182,26 @@ class ItemDialog(QDialog):
         grid = QGridLayout()
         grid.setHorizontalSpacing(10)
         self.name = QLineEdit(item.name if item else "")
-        self.name.setPlaceholderText("Ör. MSI X670E BIOS, AMD Chipset sürücüsü…")
+        self.name.setPlaceholderText(_("e.g. MSI X670E BIOS, AMD chipset driver…"))
         self.kind = QComboBox()
-        self.kind.addItems(KINDS)
-        self.kind.setCurrentText(item.kind if item else guess_kind(url))
-        grid.addWidget(QLabel("Ad"), 0, 0)
+        for k in KINDS:
+            self.kind.addItem(kind_label(k), k)
+        self._set_kind(item.kind if item else guess_kind(url))
+        grid.addWidget(QLabel(_("Name")), 0, 0)
         grid.addWidget(self.name, 0, 1)
-        grid.addWidget(QLabel("Tür"), 0, 2)
+        grid.addWidget(QLabel(_("Kind")), 0, 2)
         grid.addWidget(self.kind, 0, 3)
         grid.setColumnStretch(1, 1)
         lay.addLayout(grid)
 
-        self.status = QLabel("Sayfa okunuyor, sürüm numaraları aranıyor… (JavaScript'li sayfalarda 20 saniyeyi bulabilir)")
+        self.status = QLabel(_("Reading the page and looking for version numbers… (can take up to 20 seconds on JavaScript pages)"))
         self.status.setWordWrap(True)
         self.status.setStyleSheet(f"color:{C['blue']}; padding:6px 0;")
         lay.addWidget(self.status)
 
         self.list_hint = QLabel(
-            "<b>Sayfada bulunanlar</b> — takip etmek istediklerinizi işaretleyin (birden fazla seçebilirsiniz):"
-            if not item else "<b>Sayfada bulunanlar</b> — takip edileni seçin:"
+            _("<b>Found on the page</b> — tick the ones you want to track (you can pick more than one):")
+            if not item else _("<b>Found on the page</b> — pick the one being tracked:")
         )
         lay.addWidget(self.list_hint)
         self.list = QListWidget()
@@ -192,20 +212,20 @@ class ItemDialog(QDialog):
         g2 = QGridLayout()
         g2.setHorizontalSpacing(10)
         self.installed = QLineEdit(item.installed if item else "")
-        self.installed.setPlaceholderText("Bilgisayarınızda şu an yüklü olan sürüm (tarihle takipte: yüklediğiniz dosyanın tarihi)")
-        self.btn_same = QPushButton("Seçili sürüm yüklü")
-        self.btn_same.setToolTip("Bilgisayarınızda bu sürüm zaten kuruluysa tıklayın")
+        self.installed.setPlaceholderText(_("Version currently installed on this PC (for date tracking: the date of the file you installed)"))
+        self.btn_same = QPushButton(_("Selected version is installed"))
+        self.btn_same.setToolTip(_("Click if this version is already installed on your PC"))
         self.btn_same.clicked.connect(self._mark_same)
-        # Yüklü sürüm nereden okunsun: elle / BIOS / Windows'taki yüklü program
+        # Where the installed version comes from: manual / BIOS / installed program / Device Manager
         self.source = QComboBox()
-        self.source.addItem("Elle gireceğim (ya da kurunca “Yükledim ✓” derim)", ("manual", ""))
+        self.source.addItem(_("I'll enter it myself (or click “Installed ✓” after installing)"), ("manual", ""))
         if system_bios().get("version"):
-            self.source.addItem(f"BIOS — bilgisayardan oku ({system_bios()['version']})", ("bios", ""))
+            self.source.addItem(_("BIOS — read from this PC ({v})", v=system_bios()["version"]), ("bios", ""))
         for prog, ver in installed_programs().items():
             self.source.addItem(f"{prog} — {ver}", ("app", prog))
-        self.source.setToolTip("Seçerseniz yüklü sürüm her kontrolde Windows'tan okunur; kurulum yapınca kart kendiliğinden güncellenir.")
+        self.source.setToolTip(_("If you pick one, the installed version is read from Windows on every check; after you install an update the card updates by itself."))
         self._source_touched = False
-        self.source.activated.connect(lambda *_: setattr(self, "_source_touched", True))
+        self.source.activated.connect(lambda *_a: setattr(self, "_source_touched", True))
         self.source.currentIndexChanged.connect(self._on_source)
         if item and item.installed_auto:
             self._select_source("bios", "")
@@ -213,13 +233,13 @@ class ItemDialog(QDialog):
             self._select_source("app", item.installed_app)
         self._devices_added = False
         self.manual_latest = QLineEdit(item.latest if item else "")
-        self.manual_latest.setPlaceholderText("Site engelliyorsa sitede gördüğünüz en yeni sürümü buraya yazabilirsiniz")
-        g2.addWidget(QLabel("Yüklü sürüm"), 0, 0)
+        self.manual_latest.setPlaceholderText(_("If the site blocks checks, you can type the latest version you see on the site here"))
+        g2.addWidget(QLabel(_("Installed version")), 0, 0)
         g2.addWidget(self.installed, 0, 1)
         g2.addWidget(self.btn_same, 0, 2)
-        g2.addWidget(QLabel("Windows'tan oku"), 1, 0)
+        g2.addWidget(QLabel(_("Read from Windows")), 1, 0)
         g2.addWidget(self.source, 1, 1, 1, 2)
-        g2.addWidget(QLabel("En yeni (elle)"), 2, 0)
+        g2.addWidget(QLabel(_("Latest (manual)")), 2, 0)
         g2.addWidget(self.manual_latest, 2, 1, 1, 2)
         g2.setColumnStretch(1, 1)
         lay.addLayout(g2)
@@ -229,21 +249,21 @@ class ItemDialog(QDialog):
         self.bios_info = QLabel("")
         if bios.get("version"):
             self.bios_info.setText(
-                f"<span style='color:{C['muted']}'>Bu bilgisayar: {bios.get('board','')} · BIOS sürümü "
-                f"<b style='color:{C['text']}'>{bios['version']}</b> ({fmt_date(bios.get('date',''))})</span>"
+                f"<span style='color:{C['muted']}'>{_('This PC: {b} · BIOS version', b=bios.get('board', ''))} "
+                f"<b style='color:{C['text']}'>{bios['version']}</b> ({fmt_date(bios.get('date', ''))})</span>"
             )
         lay.addWidget(self.bios_info)
 
         self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
-        self.buttons.button(QDialogButtonBox.StandardButton.Save).setText("Kaydet")
-        self.buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("Vazgeç")
+        self.buttons.button(QDialogButtonBox.StandardButton.Save).setText(_("Save"))
+        self.buttons.button(QDialogButtonBox.StandardButton.Cancel).setText(_("Cancel"))
         self.buttons.button(QDialogButtonBox.StandardButton.Save).setObjectName("primary")
         self.buttons.accepted.connect(self._save)
         self.buttons.rejected.connect(self.reject)
         lay.addWidget(self.buttons)
 
         self._on_kind()
-        self.kind.currentTextChanged.connect(self._on_kind)
+        self.kind.currentIndexChanged.connect(self._on_kind)
         self._set_manual_visible(bool(item and item.state == "blocked"))
 
         st = getattr(parent, "store", None)
@@ -251,7 +271,14 @@ class ItemDialog(QDialog):
         self.worker.finished_probe.connect(self._on_probe)
         self.worker.start()
 
-    # -- yardımcılar
+    # -- helpers
+    def _kind(self) -> str:
+        return self.kind.currentData() or "Diğer"
+
+    def _set_kind(self, key: str):
+        i = self.kind.findData(key)
+        self.kind.setCurrentIndex(i if i >= 0 else self.kind.findData("Diğer"))
+
     def _set_manual_visible(self, v: bool):
         self.manual_latest.setVisible(v)
         self.lbl_manual.setVisible(v)
@@ -263,15 +290,15 @@ class ItemDialog(QDialog):
                 return True
         return False
 
-    def _on_kind(self, *_):
-        is_bios = self.kind.currentText() == "BIOS" and bool(system_bios().get("version"))
+    def _on_kind(self, *_a):
+        is_bios = self._kind() == "BIOS" and bool(system_bios().get("version"))
         kind, _n = self.source.currentData()
         if is_bios and not self.item and not self._source_touched:
             self._select_source("bios", "")
         elif not is_bios and kind == "bios":
             self._select_source("manual", "")
 
-    def _on_source(self, *_):
+    def _on_source(self, *_a):
         kind, name = self.source.currentData()
         if kind == "bios":
             self.installed.setText(system_bios().get("version", ""))
@@ -286,15 +313,15 @@ class ItemDialog(QDialog):
         self.btn_same.setEnabled(not auto)
 
     def _suggest_source(self, c):
-        """Seçilen kalemin adına uyan yüklü programı öner (kullanıcı kendisi seçmediyse)."""
-        if self._source_touched or self.kind.currentText() == "BIOS":
+        """Suggest the installed program/device matching the item (unless the user picked one)."""
+        if self._source_touched or self._kind() == "BIOS":
             return
         title = self._title(c) or self.name.text()
         prog = suggest_program(title, "" if c.by_date else c.version)
         if prog and self._select_source("app", prog):
             return
-        # firmware / BIOS sürücü değildir; Aygıt Yöneticisi önerisi yalnızca sürücü ve yazılımlar için
-        if self.kind.currentText() in ("Sürücü", "Yazılım", "Diğer") and c.shape != "label":
+        # firmware / BIOS are not drivers; Device Manager is only suggested for drivers and software
+        if self._kind() in ("Sürücü", "Yazılım", "Diğer") and c.shape != "label":
             dev = suggest_device(title)
             if dev and self._select_source("device", dev):
                 return
@@ -305,8 +332,10 @@ class ItemDialog(QDialog):
             return
         self._devices_added = True
         for dev, info in system_devices().items():
-            when = fmt_date(info.get("date", ""))
-            self.source.addItem(f"Aygıt Yöneticisi: {dev} — {info.get('version', '')} ({when})", ("device", dev))
+            self.source.addItem(
+                _("Device Manager: {d} — {v} ({w})", d=dev, v=info.get("version", ""), w=fmt_date(info.get("date", ""))),
+                ("device", dev),
+            )
         if self.item and self.item.installed_device:
             self._select_source("device", self.item.installed_device)
 
@@ -325,7 +354,7 @@ class ItemDialog(QDialog):
         return out
 
     def _main_candidate(self):
-        """Ad / yüklü sürüm alanları listede seçili (mavi) satır içindir."""
+        """The name / installed fields belong to the selected (blue) row."""
         c = self._current()
         if self.item:
             return c
@@ -345,7 +374,7 @@ class ItemDialog(QDialog):
         return None
 
     def _on_pick(self, _row):
-        """Ad kullanıcı tarafından değiştirilmediyse seçilen sürümün başlığını ad yap."""
+        """If the user has not changed the name, use the selected item's heading."""
         c = self._current()
         if not c or self.item or self.name.isModified():
             return
@@ -360,22 +389,21 @@ class ItemDialog(QDialog):
         self._add_devices()
         if res.page and not self.name.text().strip():
             self.name.setText((res.page.title or "")[:80])
-            if self.kind.currentText() == "Diğer":
-                self.kind.setCurrentText(guess_kind(self.url, res.page.title))
+            if self._kind() == "Diğer":
+                self._set_kind(guess_kind(self.url, res.page.title))
         if not res.candidates:
-            msg = res.error or "Sayfada sürüm numarası bulunamadı."
+            msg = res.error or _("No version number found on the page.")
             extra = (
-                " Bu site otomatik kontrolü engelliyor. Linki yine de kaydedebilirsiniz: kart üzerindeki "
-                "“Sayfayı aç” ile kendiniz bakar, gördüğünüz sürümü “En yeni (elle)” alanına yazarsınız."
-                if res.blocked else " Linki yine de kaydedebilirsiniz."
+                _(" This site blocks automatic checks. You can still save the link: use “Open page” on the card to look yourself and type the version you see into “Latest (manual)”.")
+                if res.blocked else _(" You can still save the link.")
             )
-            self.status.setText(msg + "." + extra if not msg.endswith(".") else msg + extra)
+            self.status.setText((msg if msg.endswith(".") else msg + ".") + extra)
             self.status.setStyleSheet(f"color:{C['amber']}; padding:6px 0;")
             self._set_manual_visible(True)
             return
         self.status.setText(
-            f"{len(res.candidates)} kalem bulundu. En olası olan en üstte ve işaretli; doğru değilse başkasını işaretleyin."
-            + ("" if self.item else " Ad ve yüklü sürüm alanları listede seçili (mavi) satır içindir; işaretlediğiniz diğerleri kendi adlarıyla eklenir.")
+            _("{n} item(s) found. The most likely one is at the top and ticked; if it is wrong, tick another one.", n=len(res.candidates))
+            + ("" if self.item else _(" The name and installed version fields belong to the selected (blue) row; the other ticked rows are added with their own names."))
         )
         self.status.setStyleSheet(f"color:{C['green']}; padding:6px 0;")
         pre = 0
@@ -383,11 +411,11 @@ class ItemDialog(QDialog):
             ctx = self._title(c) if (c.extra.get("src") == "data" or c.by_date) else c.context_label()
             ctx = ctx or c.context_label()
             if c.by_date:
-                head = f"{fmt_date(c.date)}   ·   sürüm numarası yok, yayın tarihiyle takip edilir"
+                head = f"{fmt_date(c.date)}   ·   {_('no version number, tracked by release date')}"
             else:
                 head = c.version + (f"   ·   {fmt_date(c.date)}" if c.date else "")
             if c.link:
-                head += "   ·   indirme linki bulundu"
+                head += f"   ·   {_('download link found')}"
             it = QListWidgetItem(f"{head}\n{ctx}")
             if not self.item:
                 it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
@@ -402,7 +430,7 @@ class ItemDialog(QDialog):
 
     def _save(self):
         if self.result_probe and self.result_probe.candidates and not self.item and not self._checked():
-            QMessageBox.information(self, "Seçim yok", "Takip etmek istediğiniz en az bir kalemi işaretleyin.")
+            QMessageBox.information(self, _("Nothing selected"), _("Tick at least one item to track."))
             return
         if not self.name.text().strip():
             self.name.setText(self.url[:80])
@@ -410,7 +438,7 @@ class ItemDialog(QDialog):
 
     @staticmethod
     def _norm_installed(text: str, c) -> str:
-        """Elle yazılan değer tümüyle bir tarihse ISO'ya çevir (tarih tarihle karşılaştırılsın)."""
+        """If the typed value is entirely a date, store it as ISO (so dates are compared with dates)."""
         text = text.strip()
         if text:
             ds = find_dates(text)
@@ -419,13 +447,13 @@ class ItemDialog(QDialog):
         return text
 
     def extra_items(self) -> list[Item]:
-        """İşaretlenen diğer kalemler için ayrı kayıtlar."""
+        """Separate items for the other ticked rows."""
         main = self._main_candidate()
         out = []
         for c in self._checked():
             if c is main:
                 continue
-            it = Item(url=self.url, name=self._title(c) or self.name.text().strip(), kind=self.kind.currentText())
+            it = Item(url=self.url, name=self._title(c) or self.name.text().strip(), kind=self._kind())
             prog = suggest_program(it.name, "" if c.by_date else c.version)
             if prog:
                 it.installed_app = prog
@@ -441,7 +469,7 @@ class ItemDialog(QDialog):
 
     def apply_to(self, item: Item) -> Item:
         item.name = self.name.text().strip()
-        item.kind = self.kind.currentText()
+        item.kind = self._kind()
         kind, prog = self.source.currentData()
         item.installed_auto = kind == "bios"
         item.installed_app = prog if kind == "app" else ""
@@ -452,7 +480,7 @@ class ItemDialog(QDialog):
             item.name = self._title(c) or item.name
         item.installed = self._norm_installed(self.installed.text(), c)
         item.installed_date = ""
-        installed_info(item)  # kaynak seçildiyse gerçek sürümü ve tarihini oradan al
+        installed_info(item)  # if a source is selected, take the real version and date from it
         if c:
             item.anchor = anchor_from(c)
             item.latest, item.latest_date, item.link = c.version, c.date, c.link
@@ -461,13 +489,13 @@ class ItemDialog(QDialog):
             item.state = "new"
         elif self.manual_latest.text().strip():
             item.latest = self.manual_latest.text().strip()
-            item.message = "Sürüm elle girildi."
+            item.message = _("Version entered manually.")
             item.state = "new"
         elif self.result_probe and self.result_probe.blocked:
             item.state, item.message = "blocked", self.result_probe.error
         item.recompute_state()
         if item.installed_device and c is not None and c.by_date and c.link.lower().split("?")[0].endswith(".zip"):
-            item.state = "new"  # paketin içi kontrolde okununca karar verilir; tarihe bakıp yanlış uyarı verme
+            item.state = "new"  # decided after the package is read during the check, not from the date
         return item
 
     def done(self, r):
@@ -477,14 +505,14 @@ class ItemDialog(QDialog):
         super().done(r)
 
 
-# ---------------------------------------------------------------- kart
+# ---------------------------------------------------------------- card
 
 class Card(QFrame):
     def __init__(self, win: "MainWindow", item: Item, checking: bool):
         super().__init__()
         self.win, self.item = win, item
         state = "checking" if checking else item.state
-        label, fg, bg, _ = STATES.get(state, STATES["new"])
+        label, fg, bg, _o = states().get(state, states()["new"])
         self.setObjectName("card")
         self.setStyleSheet(
             f"#card {{ background:{C['panel']}; border:1px solid {C['line']}; border-left:6px solid {fg}; border-radius:10px; }}"
@@ -494,67 +522,65 @@ class Card(QFrame):
         v.setContentsMargins(16, 12, 14, 12)
         v.setSpacing(8)
 
-        # başlık satırı
+        # header
         top = QHBoxLayout()
-        kind = pill(item.kind, C["muted"], C["panel2"], big=False)
         name = QLabel(item.name or item.url)
         name.setStyleSheet("font-size:13pt; font-weight:600;")
         name.setWordWrap(True)
         name.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        top.addWidget(kind)
+        top.addWidget(kind_pill(item.kind))
         top.addWidget(name, 1)
         top.addWidget(pill(label, fg, bg))
         v.addLayout(top)
 
-        # sürümler: sürüm sürümle, tarih tarihle karşılaştırılır
+        # versions: version is compared with version, date with date
         row = QHBoxLayout()
         row.setSpacing(12)
         iv, idt = item.installed_pair()
         sv, sd = item.site_pair()
         date_word = (
-            "BIOS tarihi" if item.installed_auto
-            else "kurulum tarihi" if item.installed_app
-            else "sürücü tarihi" if item.installed_device
-            else "tarih"
+            _("BIOS date") if item.installed_auto
+            else _("install date") if item.installed_app
+            else _("driver date") if item.installed_device
+            else _("date")
         )
         source = (
-            "bilgisayardan okundu" if item.installed_auto
-            else "Windows'tan okundu" if item.installed_app
-            else "Aygıt Yöneticisi'nden okundu" if item.installed_device
-            else ("girilmedi" if not (iv or idt) else "elle girildi")
+            _("read from this PC") if item.installed_auto
+            else _("read from Windows") if item.installed_app
+            else _("read from Device Manager") if item.installed_device
+            else (_("not set") if not (iv or idt) else _("entered manually"))
         )
         inst_sub = " · ".join(x for x in ((f"{date_word} {fmt_date(idt)}" if iv and idt else ""), source) if x)
-        row.addWidget(self._vbox("YÜKLÜ SÜRÜM" if iv or not idt else "YÜKLÜ OLANIN TARİHİ",
+        row.addWidget(self._vbox(_("INSTALLED VERSION") if iv or not idt else _("INSTALLED DATE"),
                                  iv or fmt_date(idt) or "—", inst_sub, C["text"]))
         arrow = QLabel("→")
-        arrow.setStyleSheet(f"font-size:20pt; color:{fg if state=='update' else C['muted']};")
+        arrow.setStyleSheet(f"font-size:20pt; color:{fg if state == 'update' else C['muted']};")
         row.addWidget(arrow)
         latest_color = C["red"] if state == "update" else (C["green"] if state == "ok" else C["text"])
         if item.pkg_version:
-            site_cap = "SİTEDEKİ PAKETİN SÜRÜCÜSÜ"
-            site_sub = f"sürücü tarihi {fmt_date(item.pkg_date)} · paket yayını {fmt_date(item.latest)}"
+            site_cap = _("DRIVER IN SITE PACKAGE")
+            site_sub = _("driver date {d} · package released {p}", d=fmt_date(item.pkg_date), p=fmt_date(item.latest))
         elif sv:
-            site_cap, site_sub = "SİTEDEKİ EN YENİ", (f"yayın: {fmt_date(sd)}" if sd else "")
+            site_cap, site_sub = _("LATEST ON SITE"), (_("released: {d}", d=fmt_date(sd)) if sd else "")
         else:
-            site_cap, site_sub = "SİTEDEKİ EN YENİ", "sitede sürüm numarası yok, yayın tarihi"
+            site_cap, site_sub = _("LATEST ON SITE"), _("no version number on site, release date")
         row.addWidget(self._vbox(site_cap, sv or fmt_date(sd) or "—", site_sub, latest_color))
         row.addStretch(1)
         v.addLayout(row)
 
-        # neye göre karar verildi
+        # what the decision was based on
         basis = ""
         if not checking:
             if item.compared == "version":
-                basis = "Sürüm numaraları karşılaştırıldı."
+                basis = _("Version numbers were compared.")
             elif item.compared == "date":
-                basis = f"Sürüm numarası olmadığı için tarihler karşılaştırıldı: sitedeki {fmt_date(sd)}, yüklü olanın {date_word} {fmt_date(idt)}."
+                basis = _("No version number, so dates were compared: site {s}, installed item's {w} {i}.",
+                          s=fmt_date(sd), w=date_word, i=fmt_date(idt))
             elif item.state == "nocompare":
                 basis = (
-                    "Karşılaştırılamadı: sitede yalnızca tarih var, yüklü olanın ise yalnızca sürüm numarası biliniyor. "
-                    "“Düzenle”den yüklü dosyanın tarihini yazın ya da tarih bilgisi olan bir kaynak seçin."
+                    _("Cannot compare: the site only has a date, and only the version number of the installed one is known. Use “Edit” to enter the installed file's date or choose a source that has a date.")
                     if sd and not sv else
-                    "Karşılaştırılamadı: sitede sürüm numarası var, yüklü olanın ise yalnızca tarihi biliniyor. "
-                    "“Düzenle”den yüklü sürümü yazın."
+                    _("Cannot compare: the site has a version number, but only the date of the installed one is known. Use “Edit” to enter the installed version.")
                 )
         if basis:
             b = QLabel(basis)
@@ -568,41 +594,43 @@ class Card(QFrame):
             m.setStyleSheet(f"color:{C['amber']};")
             v.addWidget(m)
 
-        # alt satır
+        # footer
         bot = QHBoxLayout()
         meta = QLabel(
-            f"<span style='color:{C['muted']}'>Son kontrol: {fmt_date(item.last_checked) or 'hiç'}"
-            + (" · tarayıcı kimliğiyle okundu" if item.via == "chrome-kimlik" else "")
+            f"<span style='color:{C['muted']}'>{_('Last check: {d}', d=fmt_date(item.last_checked) or _('never'))}"
+            + (_(" · read with browser identity") if item.via == "chrome-kimlik" else "")
             + f" · {self._short(item.url)}</span>"
         )
         meta.setToolTip(item.url)
         meta.setWordWrap(True)
         meta.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         bot.addWidget(meta, 1)
-        b_check = QPushButton("Kontrol et")
+        b_check = QPushButton(_("Check"))
         b_check.clicked.connect(lambda: win.check([item.id]))
         b_check.setEnabled(not win.busy)
-        b_open = QPushButton("Sayfayı aç")
+        b_open = QPushButton(_("Open page"))
         b_open.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(item.url)))
         bot.addWidget(b_check)
         bot.addWidget(b_open)
         if item.link:
-            b_dl = QPushButton("İndir")
+            b_dl = QPushButton(_("Download"))
             b_dl.setToolTip(item.link)
             if state == "update":
                 b_dl.setObjectName("dl")
             b_dl.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(item.link)))
             bot.addWidget(b_dl)
-        if state in ("update", "noinstalled", "nocompare") and item.latest and not item.installed_auto and not item.installed_app and not item.installed_device:
-            b_inst = QPushButton("Yükledim ✓")
+        if state in ("update", "noinstalled", "nocompare") and item.latest and not (
+            item.installed_auto or item.installed_app or item.installed_device
+        ):
+            b_inst = QPushButton(_("Installed ✓"))
             b_inst.setObjectName("good")
-            b_inst.setToolTip(f"Yüklü sürümü {item.latest} olarak işaretle")
+            b_inst.setToolTip(_("Mark the installed version as {v}", v=item.latest))
             b_inst.clicked.connect(lambda: win.mark_installed(item.id))
             bot.addWidget(b_inst)
-        b_edit = QPushButton("Düzenle")
+        b_edit = QPushButton(_("Edit"))
         b_edit.clicked.connect(lambda: win.edit(item.id))
         b_edit.setEnabled(not win.busy)
-        b_del = QPushButton("Sil")
+        b_del = QPushButton(_("Delete"))
         b_del.setObjectName("danger")
         b_del.clicked.connect(lambda: win.delete(item.id))
         b_del.setEnabled(not win.busy)
@@ -619,34 +647,34 @@ class Card(QFrame):
     def _vbox(cap: str, value: str, sub: str, color: str) -> QWidget:
         w = QWidget()
         w.setStyleSheet(f"background:{C['panel2']}; border-radius:8px;")
-        l = QVBoxLayout(w)
-        l.setContentsMargins(14, 8, 14, 8)
-        l.setSpacing(1)
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(14, 8, 14, 8)
+        lay.setSpacing(1)
         a = QLabel(cap)
         a.setStyleSheet(f"color:{C['muted']}; font-size:8pt; font-weight:600; letter-spacing:1px;")
         b = QLabel(value)
         b.setStyleSheet(f"color:{color}; font-size:16pt; font-weight:700; font-family:'Cascadia Mono','Consolas',monospace;")
         b.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        l.addWidget(a)
-        l.addWidget(b)
+        lay.addWidget(a)
+        lay.addWidget(b)
         if sub:
             c = QLabel(sub)
             c.setStyleSheet(f"color:{C['muted']}; font-size:8pt;")
-            l.addWidget(c)
+            lay.addWidget(c)
         w.setMinimumWidth(190)
         return w
 
 
-# ---------------------------------------------------------------- ana pencere
+# ---------------------------------------------------------------- main window
 
 class MainWindow(QMainWindow):
-    def __init__(self, store: Store):
+    def __init__(self, store: Store, autostart: bool = True):
         super().__init__()
         self.store = store
         self.busy = False
         self.checking: set[str] = set()
         self.worker: CheckWorker | None = None
-        self.setWindowTitle("DriverWatch — BIOS, sürücü ve firmware takibi")
+        self.setWindowTitle(_("DriverWatch — BIOS, driver and firmware tracker"))
         self.resize(1040, 760)
 
         root = QWidget()
@@ -664,13 +692,21 @@ class MainWindow(QMainWindow):
         head.addSpacing(12)
         head.addLayout(self.summary)
         head.addStretch(1)
+        # language
+        head.addWidget(QLabel(_("Language")))
+        self.lang_box = QComboBox()
+        for code, label in LANGS.items():
+            self.lang_box.addItem(label, code)
+        self.lang_box.setCurrentIndex(self.lang_box.findData(lang()))
+        self.lang_box.currentIndexChanged.connect(self._change_lang)
+        head.addWidget(self.lang_box)
         v.addLayout(head)
 
         add = QHBoxLayout()
         self.url = QLineEdit()
-        self.url.setPlaceholderText("Takip etmek istediğiniz indirme/destek sayfasının linkini yapıştırın ve Enter'a basın")
+        self.url.setPlaceholderText(_("Paste the link of a download/support page to track and press Enter"))
         self.url.returnPressed.connect(self.add)
-        b_add = QPushButton("Ekle")
+        b_add = QPushButton(_("Add"))
         b_add.setObjectName("primary")
         b_add.clicked.connect(self.add)
         add.addWidget(self.url, 1)
@@ -678,22 +714,22 @@ class MainWindow(QMainWindow):
         v.addLayout(add)
 
         bar = QHBoxLayout()
-        self.b_all = QPushButton("Hepsini kontrol et")
+        self.b_all = QPushButton(_("Check all"))
         self.b_all.setObjectName("primary")
         self.b_all.clicked.connect(lambda: self.check([i.id for i in self.store.items]))
-        self.cb_start = QCheckBox("Program açılınca otomatik kontrol et")
+        self.cb_start = QCheckBox(_("Check automatically when the app starts"))
         self.cb_start.setChecked(bool(self.store.settings.get("check_on_start", True)))
         self.cb_start.toggled.connect(self._toggle_start)
         self.progress = QLabel("")
         self.progress.setStyleSheet(f"color:{C['blue']};")
-        b_imp = QPushButton("Eski listeyi içe aktar…")
-        b_imp.setToolTip("Eski uygulamanın tracker_data.json dosyasındaki linkleri ekler")
+        b_imp = QPushButton(_("Import old list…"))
+        b_imp.setToolTip(_("Adds the links from the old app's tracker_data.json file"))
         b_imp.clicked.connect(self.import_legacy)
-        self.cb_ident = QCheckBox("Engelleyen sitelerde normal tarayıcı kimliği kullan")
-        self.cb_ident.setToolTip(
-            "Bazı siteler (ör. MSI) görünmez Chrome'u reddediyor. Açıkken bu sitelerde Chrome kendini normal "
-            "masaüstü Chrome olarak tanıtır. Site kurallarına aykırı olabilir; istemezseniz kapatın."
-        )
+        self.cb_ident = QCheckBox(_("Use a normal browser identity on sites that block"))
+        self.cb_ident.setToolTip(_(
+            "Some sites (e.g. MSI) reject headless Chrome. When this is on, Chrome presents itself as normal desktop "
+            "Chrome on those sites. This may be against the site's rules; turn it off if you do not want it."
+        ))
         self.cb_ident.setChecked(bool(self.store.settings.get("identity_fallback", True)))
         self.cb_ident.toggled.connect(self._toggle_ident)
         bar.addWidget(self.b_all)
@@ -715,29 +751,28 @@ class MainWindow(QMainWindow):
         self.scroll.setWidget(self.listw)
         v.addWidget(self.scroll, 1)
 
-        foot = QLabel(
-            f"<span style='color:{C['muted']}'>Kayıtlar: {self.store.path} · Sürüm {__version__}</span>"
-        )
+        foot = QLabel(f"<span style='color:{C['muted']}'>{_('Data: {path} · Version {v}', path=self.store.path, v=__version__)}</span>")
         foot.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         v.addWidget(foot)
 
         self.render()
-        if self.store.items and self.cb_start.isChecked():
+        if autostart and self.store.items and self.cb_start.isChecked():
             QTimer.singleShot(400, lambda: self.check([i.id for i in self.store.items]))
 
-    # -- çizim
+    # -- drawing
     def render(self):
         while self.listl.count():
             w = self.listl.takeAt(0).widget()
             if w:
                 w.deleteLater()
-        items = sorted(self.store.items, key=lambda i: (STATES.get(i.state, STATES["new"])[3], i.name.lower()))
+        st = states()
+        items = sorted(self.store.items, key=lambda i: (st.get(i.state, st["new"])[3], i.name.lower()))
         if not items:
             e = QLabel(
-                "<div style='font-size:12pt'><b>Henüz takip edilen bir şey yok.</b></div>"
-                f"<div style='color:{C['muted']}; margin-top:6px'>Anakartınızın BIOS sayfasını, ekran kartı ya da "
-                "chipset sürücü sayfasını veya bir cihazın firmware sayfasını yukarıdaki kutuya yapıştırın. "
-                "Program sayfadaki sürümleri bulur, siz takip edileni seçersiniz. Link siz silene kadar listede kalır.</div>"
+                f"<div style='font-size:12pt'><b>{_('Nothing is being tracked yet.')}</b></div>"
+                f"<div style='color:{C['muted']}; margin-top:6px'>"
+                + _("Paste your motherboard's BIOS page, a graphics or chipset driver page, or a device's firmware page into the box above. The app finds the versions on the page and you pick the one to track. A link stays in the list until you delete it.")
+                + "</div>"
             )
             e.setWordWrap(True)
             e.setStyleSheet(f"background:{C['panel']}; border:1px dashed {C['line']}; border-radius:10px; padding:24px;")
@@ -754,23 +789,41 @@ class MainWindow(QMainWindow):
                 w.deleteLater()
         counts: dict[str, int] = {}
         for i in self.store.items:
-            k = {"blocked": "error", "lost": "error"}.get(i.state, i.state)
+            k = {"blocked": "error", "lost": "error", "nocompare": "error"}.get(i.state, i.state)
             counts[k] = counts.get(k, 0) + 1
         n_up = counts.get("update", 0)
         if n_up:
-            self.summary.addWidget(pill(f"{n_up} güncelleme var", C["red"], C["red_bg"]))
+            self.summary.addWidget(pill(_("{n} update(s) available", n=n_up), C["red"], C["red_bg"]))
         if counts.get("ok"):
-            self.summary.addWidget(pill(f"{counts['ok']} güncel", C["green"], C["green_bg"]))
+            self.summary.addWidget(pill(_("{n} up to date", n=counts["ok"]), C["green"], C["green_bg"]))
         if counts.get("error"):
-            self.summary.addWidget(pill(f"{counts['error']} kontrol edilemedi", C["amber"], C["amber_bg"]))
+            self.summary.addWidget(pill(_("{n} could not be checked", n=counts["error"]), C["amber"], C["amber_bg"]))
         rest = counts.get("noinstalled", 0) + counts.get("new", 0)
         if rest:
-            self.summary.addWidget(pill(f"{rest} bilgi bekliyor", C["blue"], C["blue_bg"]))
-        self.setWindowTitle(
-            (f"({n_up}) " if n_up else "") + "DriverWatch — BIOS, sürücü ve firmware takibi"
-        )
+            self.summary.addWidget(pill(_("{n} waiting for info", n=rest), C["blue"], C["blue_bg"]))
+        self.setWindowTitle((f"({n_up}) " if n_up else "") + _("DriverWatch — BIOS, driver and firmware tracker"))
 
-    # -- eylemler
+    # -- actions
+    def _change_lang(self, *_a):
+        code = self.lang_box.currentData()
+        if code == lang():
+            return
+        if self.busy:
+            self.lang_box.blockSignals(True)
+            self.lang_box.setCurrentIndex(self.lang_box.findData(lang()))
+            self.lang_box.blockSignals(False)
+            return
+        self.store.settings["lang"] = code
+        self.store.save()
+        set_lang(code)
+        # rebuild the window in the new language (no new check)
+        new = MainWindow(self.store, autostart=False)
+        new.setGeometry(self.geometry())
+        new.show()
+        QApplication.instance().setProperty("main_window", new)
+        _windows.append(new)
+        self.close()
+
     def _toggle_ident(self, on: bool):
         self.store.settings["identity_fallback"] = on
         self.store.save()
@@ -787,8 +840,8 @@ class MainWindow(QMainWindow):
             url = "https://" + url
         if self.store.has_url(url):
             r = QMessageBox.question(
-                self, "Bu sayfa zaten listede",
-                "Bu sayfadan takip ettiğiniz bir kalem var. Aynı sayfadaki başka bir dosyayı da eklemek ister misiniz?",
+                self, _("This page is already in the list"),
+                _("You already track an item from this page. Do you want to add another file from the same page?"),
             )
             if r != QMessageBox.StandardButton.Yes:
                 return
@@ -818,7 +871,7 @@ class MainWindow(QMainWindow):
         if not item:
             return
         r = QMessageBox.question(
-            self, "Silinsin mi?", f"“{item.name or item.url}” takip listesinden silinsin mi?",
+            self, _("Delete?"), _("Remove “{n}” from the tracking list?", n=item.name or item.url),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No,
         )
         if r == QMessageBox.StandardButton.Yes:
@@ -836,16 +889,16 @@ class MainWindow(QMainWindow):
             self.render()
 
     def import_legacy(self):
-        path, _ = QFileDialog.getOpenFileName(self, "tracker_data.json dosyasını seçin", "", "JSON (*.json)")
+        path, _f = QFileDialog.getOpenFileName(self, _("Select the tracker_data.json file"), "", "JSON (*.json)")
         if not path:
             return
         try:
             n = self.store.import_legacy(Path(path))
         except Exception as e:  # noqa: BLE001
-            QMessageBox.warning(self, "İçe aktarılamadı", str(e))
+            QMessageBox.warning(self, _("Could not import"), str(e))
             return
         self.render()
-        QMessageBox.information(self, "İçe aktarıldı", f"{n} link eklendi. Şimdi kontrol ediliyor.")
+        QMessageBox.information(self, _("Imported"), _("{n} link(s) added. Checking them now.", n=n))
         if n:
             self.check([i.id for i in self.store.items if i.state == "new"])
 
@@ -856,7 +909,7 @@ class MainWindow(QMainWindow):
         self.checking = set(ids)
         self._total, self._done = len(ids), 0
         self.b_all.setEnabled(False)
-        self.progress.setText(f"Kontrol ediliyor… 0 / {self._total}")
+        self.progress.setText(_("Checking… {d} / {t}", d=0, t=self._total))
         self.render()
         self.worker = CheckWorker(self.store, ids)
         self.worker.done_item.connect(self._on_done_item)
@@ -866,7 +919,7 @@ class MainWindow(QMainWindow):
     def _on_done_item(self, item_id: str):
         self.checking.discard(item_id)
         self._done += 1
-        self.progress.setText(f"Kontrol ediliyor… {self._done} / {self._total}")
+        self.progress.setText(_("Checking… {d} / {t}", d=self._done, t=self._total))
         self.store.save()
         self.render()
 
@@ -876,7 +929,8 @@ class MainWindow(QMainWindow):
         self.b_all.setEnabled(True)
         n_up = sum(1 for i in self.store.items if i.state == "update")
         self.progress.setText(
-            f"Bitti · {datetime.now():%H:%M}" + (f" · {n_up} güncelleme var" if n_up else " · yeni sürüm yok")
+            _("Done · {time}", time=f"{datetime.now():%H:%M}")
+            + (_(" · {n} update(s) available", n=n_up) if n_up else _(" · no new versions"))
         )
         self.store.save()
         self.render()
@@ -889,6 +943,9 @@ class MainWindow(QMainWindow):
         super().closeEvent(e)
 
 
+_windows: list[MainWindow] = []  # keeps rebuilt windows alive
+
+
 def resource(name: str) -> str:
     base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
     return str(base / name)
@@ -896,26 +953,26 @@ def resource(name: str) -> str:
 
 def run(argv: list[str]) -> int:
     store = Store()
+    set_lang(store.settings.get("lang", "en"))
     if "--import" in argv:
         i = argv.index("--import")
         n = store.import_legacy(Path(argv[i + 1]))
-        print(f"{n} link içe aktarıldı → {store.path}")
+        print(f"{n} link(s) imported → {store.path}")
         return 0
     if "--selftest" in argv:
-        # Tanı için: verilen sayfayı Chrome dahil okuyup sonucu dosyaya yazar (exe'de konsol yok)
+        # Diagnostics: read the given page (including Chrome) and write the result to a file (the exe has no console)
         i = argv.index("--selftest")
         url, out = argv[i + 1], Path(argv[i + 2])
-        from .fetch import Browser as _B
-        b = _B()
+        b = Browser()
         try:
             lines = []
             try:
                 pg = b.fetch(url)
-                lines.append(f"chrome ok, {len(pg.text)} karakter")
+                lines.append(f"chrome ok, {len(pg.text)} chars")
             except Exception as e:  # noqa: BLE001
-                lines.append(f"chrome HATA: {e}")
+                lines.append(f"chrome ERROR: {e}")
             p = probe(url, b)
-            lines.append(f"aday: {len(p.candidates)} hata: {p.error}")
+            lines.append(f"candidates: {len(p.candidates)} error: {p.error}")
             lines += [f"{c.version} {c.date} {c.link}" for c in p.candidates[:5]]
         finally:
             b.close()
@@ -928,18 +985,18 @@ def run(argv: list[str]) -> int:
     ico = resource("icon.ico")
     if Path(ico).exists():
         app.setWindowIcon(QIcon(ico))
-    # Aynı anda iki pencere açıksa biri diğerinin kayıtlarının üzerine yazar; tek örnek çalışsın
+    # With two windows open, one overwrites the other's saved list; allow a single instance
     from PyQt6.QtCore import QLockFile
 
     lock = QLockFile(str(store.path.parent / "driverwatch.lock"))
     lock.setStaleLockTime(0)
     if not lock.tryLock(100):
         QMessageBox.information(
-            None, "DriverWatch zaten açık",
-            "DriverWatch zaten çalışıyor. Görev çubuğundaki pencereyi kullanın; "
-            "iki pencere aynı anda açıkken kayıtlar birbirinin üzerine yazılabilir.",
+            None, _("DriverWatch is already open"),
+            _("DriverWatch is already running. Use the window in the taskbar; with two windows open at once the saved list can be overwritten."),
         )
         return 0
     w = MainWindow(store)
+    _windows.append(w)
     w.show()
     return app.exec()
