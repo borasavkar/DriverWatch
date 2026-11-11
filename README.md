@@ -15,6 +15,9 @@ BIOS, sürücü ve firmware sayfalarını takip eden küçük bir Windows uygula
   - 🟢 **GÜNCEL**
   - 🟡 **SİTE ENGELLİYOR / KONTROL EDİLEMEDİ / SÜRÜM BULUNAMADI**
   - 🔵 **YÜKLÜ SÜRÜM GİRİLMEDİ**
+- **Sürüm numarası olmayan dosyaları tarihle takip eder.** Bazı sayfalarda (ör. ASUS monitör sürücüleri) yalnızca “Sürüm -” ve yayın tarihi yazar; bu kalemler yayın tarihine göre izlenir, daha yeni tarihli dosya çıkınca “YENİ SÜRÜM VAR” görünür.
+- **Aynı sayfadan birden fazla dosya.** Ekleme penceresinde istediğiniz kadar kalemi işaretlersiniz; her biri ayrı kart olur.
+- **Gizli indirme linklerini bulur.** “İndir” düğmesi gerçek bir link değilse, sayfanın içindeki veride duran dosya adresi aranır.
 - **BIOS sürümünü bilgisayardan okur.** BIOS kayıtlarında yüklü sürüm Windows'tan alınır. MSI'nin sitedeki `7E16v1D4` ile Windows'un gösterdiği `1.D4` aynı sürüm sayılır.
 - **"Yükledim ✓" düğmesi.** Yeni sürümü kurduktan sonra tek tıkla yüklü sürümü günceller.
 - **İndirme linki.** Sayfada sürüme ait doğrudan link bulunursa “İndir” düğmesi çıkar.

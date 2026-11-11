@@ -37,6 +37,32 @@ class Page:
     text: str
     links: list[tuple[str, str]] = field(default_factory=list)
     via: str = "http"
+    files: list[str] = field(default_factory=list)  # sayfa kaynağındaki indirilebilir dosya adresleri
+    data_text: str = ""  # sayfanın gömülü verisindeki (JSON) metinler, satır satır
+
+
+_JS_STR = re.compile(r'"((?:[^"\\\n]|\\.)*)"')  # uzunluk sınırı yok: tırnak eşleşmesi kaymasın
+
+
+def data_text_of(raw: str) -> str:
+    """<script> içindeki gömülü verideki metinleri sırayla çıkar.
+
+    Bazı siteler (ör. ASUS) ikinci dosyanın tarihini ya da linkini ekrana basmadan
+    yalnızca bu veride tutuyor.
+    """
+    out: list[str] = []
+    for m in re.finditer(r"(?is)<script\b[^>]*>(.*?)</script>", raw):
+        body = m.group(1)
+        if len(body) < 2000:
+            continue
+        for sm in _JS_STR.finditer(body):
+            s = sm.group(1).replace("\\u002F", "/").replace("\\/", "/")
+            if not (2 <= len(s) <= 160) or "\\u" in s or "{" in s or "<" in s:
+                continue
+            out.append(s)
+            if len(out) > 60000:
+                break
+    return "\n".join(out)
 
 
 def _is_blocked(text: str) -> bool:
@@ -60,6 +86,44 @@ def _html_to_text(raw: str) -> tuple[str, str, list[tuple[str, str]]]:
     return title, text, links
 
 
+_EXT = r"(?:zip|exe|7z|msi|cab|rar|bin|cap|rom|inf|tar\.gz)"
+_ABS_FILE = re.compile(r"https?://[^\"'<>\s\\]+?\." + _EXT + r"(?=[\"'<>\s?#\\]|$)", re.I)
+_REL_FILE = re.compile(r"[\"'](/[^\"'<>]{3,300}?\." + _EXT + r")[\"']", re.I)
+
+
+def find_files(raw: str, page_url: str) -> list[str]:
+    """Düğmelerin arkasında (JavaScript verisinde) duran dosya adreslerini topla."""
+    from urllib.parse import quote, urlparse
+
+    raw = raw.replace("\\u002F", "/").replace("\\/", "/").replace("&amp;", "&")
+    out: list[str] = []
+    for m in _ABS_FILE.finditer(raw):
+        out.append(m.group(0))
+    # göreli yollar için indirme sunucusunu tahmin et (ör. ASUS: dlcdnets.asus.com)
+    hosts: dict[str, int] = {}
+    for m in re.finditer(r"https?://([a-z0-9.-]+)/", raw, re.I):
+        h = m.group(1).lower()
+        if any(k in h for k in ("dl", "download", "drivers")):
+            hosts[h] = hosts.get(h, 0) + 1
+    pu = urlparse(page_url)
+    fallback = f"https://{max(hosts, key=hosts.get)}" if hosts else f"{pu.scheme}://{pu.netloc}"
+    for m in _REL_FILE.finditer(raw):
+        path = m.group(1)
+        if path.startswith("//"):
+            continue
+        # aynı ilk klasörle başlayan mutlak adresler hangi sunucudaysa onu kullan (/pub/… → dlcdnets)
+        first = "/" + path.strip("/").split("/", 1)[0] + "/"
+        same = re.findall(r"https?://([a-z0-9.-]+)" + re.escape(first), raw, re.I)
+        base = f"https://{max(set(same), key=same.count).lower()}" if same else fallback
+        out.append(base + quote(path, safe="/-_.~%"))
+    seen, uniq = set(), []
+    for f in out:
+        if f not in seen:
+            seen.add(f)
+            uniq.append(f)
+    return uniq[:500]
+
+
 def fetch_http(url: str, timeout: int = 20) -> Page:
     try:
         r = requests.get(
@@ -77,7 +141,10 @@ def fetch_http(url: str, timeout: int = 20) -> Page:
     from urllib.parse import urljoin
 
     links = [(t, urljoin(r.url, h)) for t, h in links if not h.startswith(("#", "javascript:", "mailto:"))]
-    return Page(url=url, title=title, text=text, links=links, via="http")
+    return Page(
+        url=url, title=title, text=text, links=links, via="http",
+        files=find_files(r.text, r.url), data_text=data_text_of(r.text),
+    )
 
 
 class Browser:
@@ -122,11 +189,19 @@ class Browser:
         text = d.execute_script("return document.body ? document.body.innerText : ''") or ""
         title = d.title or ""
         links = d.execute_script(
-            "return Array.from(document.querySelectorAll('a[href]')).map(a=>[(a.innerText||a.getAttribute('aria-label')||'').trim(), a.href]);"
+            "return Array.from(document.querySelectorAll('a[href]')).map(a=>[((a.innerText||'')+' '+(a.getAttribute('aria-label')||'')).trim(), a.href]);"
         ) or []
         if _is_blocked(text):
             raise BlockedError("Site otomatik kontrole izin vermiyor")
-        return Page(url=url, title=title, text=text, links=[tuple(x) for x in links], via="chrome")
+        try:
+            src = d.page_source or ""
+            files, data = find_files(src, d.current_url or url), data_text_of(src)
+        except Exception:  # noqa: BLE001
+            files, data = [], ""
+        return Page(
+            url=url, title=title, text=text, links=[tuple(x) for x in links], via="chrome",
+            files=files, data_text=data,
+        )
 
     def close(self):
         if self._driver is not None:

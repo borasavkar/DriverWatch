@@ -107,6 +107,10 @@ class Candidate:
     shape: str = ""
     extra: dict = field(default_factory=dict)
 
+    @property
+    def by_date(self) -> bool:
+        return self.shape == "date"
+
     def context_label(self) -> str:
         """Kullanıcıya gösterilecek kısa açıklama."""
         parts = [p for p in self.prev.split(" | ")[-2:] if p] + [self.line]
@@ -181,12 +185,63 @@ def _clean_lines(text: str) -> list[str]:
     return lines
 
 
-def extract_candidates(text: str, links: list[tuple[str, str]] | None = None) -> list[Candidate]:
-    links = links or []
+_DATE_KW = re.compile(r"\bdate\b|tarih|\breleased?\b|yayın|\bupdated\b|güncellen", re.IGNORECASE)
+_LABEL_START = (
+    "revision", "version", "sürüm", "surum", "ver.", "release", "file size", "boyut", "download", "indir",
+    "applicable", "driver details", "sha-", "md5", "date", "tarih", "updated", "description", "açıklama",
+)
+_SIZE_LINE = re.compile(r"^[\d.,]+\s*(?:kb|mb|gb|bytes?)$", re.IGNORECASE)
+
+
+def title_for(c: "Candidate", page_title: str = "") -> str:
+    """Sürümün hemen üstündeki başlık satırı: 'AMD Chipset Drivers', 'ASUS_XG27ACSR_WHQL_Driver' gibi."""
+    for line in reversed(c.prev.split(" | ")):
+        low = line.lower().strip()
+        if (
+            len(line) <= 3
+            or any(low.startswith(k) for k in _LABEL_START)
+            or _SIZE_LINE.match(low)
+            or find_dates(line)
+            or low.endswith(" -")
+        ):
+            continue
+        return line[:80] if len(line) < 70 else page_title
+    return page_title
+
+
+def _norm(s: str) -> str:
+    return re.sub(r"[^0-9a-z]", "", s.lower())
+
+
+def find_link_by_title(title: str, links: list[tuple[str, str]], files: list[str]) -> str:
+    """Başlığı ('ASUS_XG27ACSR_WHQL_Driver') linkin metninde, adresinde ya da sayfadaki dosya adlarında ara."""
+    t = _norm(title)
+    if len(t) < 6:
+        return ""
+    for f in files:
+        if t in _norm(f.rsplit("/", 1)[-1]):
+            return f
+    for text, href in links:
+        if href.startswith(("http://", "https://")) and (t in _norm(text) or t in _norm(href)):
+            return href
+    return ""
+
+
+def extract_candidates(
+    text: str, links: list[tuple[str, str]] | None = None, files: list[str] | None = None
+) -> list[Candidate]:
+    links, files = links or [], files or []
     lines = _clean_lines(text)
     cands: list[Candidate] = []
     seen: set[tuple[str, str]] = set()
+    version_lines: list[int] = []
     idx = 0
+
+    def ctx(i):
+        prev = " | ".join(x[:100] for x in lines[max(0, i - 3):i])
+        after = " | ".join(x[:100] for x in lines[i + 1:i + 7])
+        return prev, after
+
     for i, line in enumerate(lines):
         if _NOISE.search(line) or len(line) > 400:
             continue
@@ -199,8 +254,8 @@ def extract_candidates(text: str, links: list[tuple[str, str]] | None = None) ->
                 continue
             if _looks_like_date(v) or _UNIT_AFTER.match(line, b):
                 continue
-            prev = " | ".join(x[:100] for x in lines[max(0, i - 3):i])
-            after = " | ".join(x[:100] for x in lines[i + 1:i + 7])
+            version_lines.append(i)
+            prev, after = ctx(i)
             key = (v, _generic(prev + line + after))
             if key in seen:
                 continue
@@ -215,14 +270,14 @@ def extract_candidates(text: str, links: list[tuple[str, str]] | None = None) ->
                 shape=shape_of(v),
             )
             idx += 1
-            # tarih: aynı satır, sonra sonraki iki satır, sonra önceki satır
+            # tarih: aynı satır, sonra sonraki satırlar, sonra önceki satır
             for j in (i, i + 1, i + 2, i + 3, i + 4, i - 1):
                 if 0 <= j < len(lines):
                     ds = find_dates(lines[j])
                     if ds:
                         c.date = ds[0][2].isoformat()
                         break
-            # link: satırdaki ya da sonraki satırlardaki adres, sonra sürümü içeren href
+            # link: satırdaki ya da sonraki satırlardaki adres, sonra sürümü içeren href, sonra başlık
             for j in (i, i + 1, i + 2):
                 if 0 <= j < len(lines):
                     um = _URL.search(lines[j])
@@ -230,11 +285,74 @@ def extract_candidates(text: str, links: list[tuple[str, str]] | None = None) ->
                         c.link = um.group(0).rstrip(".,);")
                         break
             if not c.link:
-                c.link = find_link_for(v, links)
+                c.link = find_link_for(v, links + [("", f) for f in files])
+            if not c.link:
+                c.link = find_link_by_title(title_for(c), links, files)
             c.score = _score(c, line, prev)
             cands.append(c)
+
+    # Sürüm numarası olmayan kalemler (ör. ASUS "Sürüm -"): yayın tarihiyle takip
+    for i, line in enumerate(lines):
+        if _NOISE.search(line) or len(line) > 120:
+            continue
+        if any(i - 6 <= vl <= i for vl in version_lines):
+            continue  # bu tarih zaten bir sürüm numarasına ait
+        ds = find_dates(line)
+        if not ds:
+            continue
+        a, b, dt = ds[0]
+        rest = (line[:a] + line[b:]).strip(" :|-·")
+        prev, after = ctx(i)
+        if len(rest) > 40 and not _DATE_KW.search(line):
+            continue  # cümle içindeki tarih, kalem değil
+        v = dt.isoformat()
+        key = (v, _generic(prev + line + after))
+        if key in seen:
+            continue
+        seen.add(key)
+        c = Candidate(
+            version=v, line=line[:200], prev=prev, template=line[:a] + "{V}" + line[b:],
+            index=idx, after=after, shape="date", date=v,
+        )
+        idx += 1
+        title = title_for(c)
+        if not title:
+            continue  # neyin tarihi olduğu belli değil
+        c.link = find_link_by_title(title, links, files)
+        if not c.link:
+            for j in (i, i + 1, i + 2, i + 3):
+                um = _URL.search(lines[j]) if j < len(lines) else None
+                if um:
+                    c.link = um.group(0).rstrip(".,);")
+                    break
+        c.score = 1.0 + (1.5 if _DATE_KW.search(line + " " + prev) else 0) + (1 if title else -1) + (2 if c.link else 0)
+        c.score -= min(c.index, 40) * 0.02
+        cands.append(c)
+
     cands.sort(key=lambda c: (-c.score, c.index))
     return cands
+
+
+def page_candidates(text: str, links, files, data_text: str = "") -> list[Candidate]:
+    """Görünen metindeki adaylar + yalnızca gömülü veride olan (tarihli, başlıklı) kalemler."""
+    cands = extract_candidates(text, links, files)
+    if not data_text:
+        return cands
+    have = {_norm(title_for(c)) for c in cands}
+    have_v = {c.version for c in cands}
+    extra = []
+    for c in extract_candidates(data_text, links, files):
+        t = _norm(title_for(c))
+        if not c.date or len(t) < 6 or t in have or (c.version in have_v and not c.by_date):
+            continue
+        have.add(t)
+        c.extra["src"] = "data"
+        c.score -= 1.5
+        c.index += 10000
+        extra.append(c)
+    out = cands + extra
+    out.sort(key=lambda c: (-c.score, c.index))
+    return out
 
 
 def find_link_for(version: str, links: list[tuple[str, str]]) -> str:

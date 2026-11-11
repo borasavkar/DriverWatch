@@ -10,7 +10,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from .extract import Candidate, anchor_from, extract_candidates, is_newer, pick_tracked, same_version
+from .extract import Candidate, anchor_from, page_candidates, is_newer, pick_tracked, same_version, title_for
 from .fetch import BlockedError, Browser, FetchError, Page, fetch_http
 
 KINDS = ["BIOS", "Sürücü", "Firmware", "Yazılım", "Diğer"]
@@ -102,17 +102,6 @@ class Store:
         return n
 
 
-_LABELS = ("revision", "version", "sürüm", "ver.", "release", "file size", "download", "applicable", "driver details")
-
-
-def title_for(c: Candidate, page_title: str = "") -> str:
-    """Sürümün hemen üstündeki başlık satırı: 'AMD Chipset Drivers' gibi."""
-    for line in reversed(c.prev.split(" | ")):
-        low = line.lower()
-        if len(line) > 3 and not any(low.startswith(k) for k in _LABELS):
-            return line[:80] if len(line) < 60 else page_title
-    return page_title
-
 
 def name_from_url(url: str) -> str:
     """'https://www.msi.com/Motherboard/X670E-GAMING-PLUS-WIFI/support#bios' → 'msi.com · X670E GAMING PLUS WIFI · bios'"""
@@ -186,7 +175,7 @@ def probe(url: str, browser: Browser, need_chrome_if_empty: bool = True) -> Prob
     http_err = ""
     try:
         p.page = fetch_http(url)
-        p.candidates = extract_candidates(p.page.text, p.page.links)
+        p.candidates = page_candidates(p.page.text, p.page.links, p.page.files, p.page.data_text)
     except BlockedError as e:
         http_err = str(e)
     except FetchError as e:
@@ -196,7 +185,7 @@ def probe(url: str, browser: Browser, need_chrome_if_empty: bool = True) -> Prob
     if not p.candidates or "#" in url:
         try:
             page = browser.fetch(url)
-            cands = extract_candidates(page.text, page.links)
+            cands = page_candidates(page.text, page.links, page.files, page.data_text)
             if cands or not p.page:
                 p.page, p.candidates = page, cands
         except BlockedError as e:
@@ -235,7 +224,7 @@ def check_item(item: Item, browser: Browser) -> Item:
         if p.page and p.page.via == "http":
             try:
                 page = browser.fetch(item.url)
-                cands = extract_candidates(page.text, page.links)
+                cands = page_candidates(page.text, page.links, page.files, page.data_text)
                 chosen, conf = pick_tracked(cands, item.anchor)
             except FetchError:
                 chosen = None

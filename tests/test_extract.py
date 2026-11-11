@@ -1,6 +1,7 @@
 import unittest
 
-from driverwatch.extract import anchor_from, extract_candidates, is_newer, pick_tracked, same_version
+from driverwatch.extract import anchor_from, extract_candidates, is_newer, pick_tracked, same_version, title_for
+from driverwatch.fetch import find_files
 
 AMD = """Windows 11 - 64-Bit Edition
 Driver
@@ -63,6 +64,48 @@ File Size
 16.10 MB
 Download
 """
+
+
+ASUS = """Lütfen İşletim Sistemi Seçin
+Windows 11 64-bit
+Driver Package
+ASUS_XG27ACSR_WHQL_Driver
+Sürüm -
+53.68 KB
+{d}
+SHA-256 :A5688A0D10D6FB52FDAA3F187A99531522FA32CC0B09CF4D94147B4D7855B19F
+İNDİR
+Software and Utility
+ASUS_DisplayWidget_Center
+Sürüm -
+0 KB
+2025/01/09
+SHA-256 :46AB2782D53827B57BCA94785EC15C9C576898BEA226E4D738634D10BF77C6CD
+İNDİR
+"""
+
+
+class DateTrackingTests(unittest.TestCase):
+    FILES = ["https://dlcdnets.asus.com/pub/ASUS/LCD%20Monitors/XG27ACSR/ASUS_XG27ACSR_WHQL_Driver.zip"]
+
+    def test_asus_items_without_version_are_tracked_by_date(self):
+        c = extract_candidates(ASUS.format(d="2026/07/13"), [], self.FILES)
+        by_title = {title_for(x): x for x in c}
+        drv = by_title["ASUS_XG27ACSR_WHQL_Driver"]
+        self.assertTrue(drv.by_date)
+        self.assertEqual(drv.version, "2026-07-13")
+        self.assertEqual(drv.link, self.FILES[0])
+        self.assertIn("ASUS_DisplayWidget_Center", by_title)
+        # yeni dosya yayınlanınca aynı kalem bulunur, diğerine karışmaz
+        picked, _ = pick_tracked(extract_candidates(ASUS.format(d="2026/12/02"), [], self.FILES), anchor_from(drv))
+        self.assertEqual(picked.version, "2026-12-02")
+        self.assertTrue(is_newer("2026-12-02", "2026-07-13"))
+
+    def test_hidden_file_paths_resolve_to_download_host(self):
+        raw = ('<a href="https://dlcdnets.asus.com/pub/ASUS/nb/x.pdf">x</a>'
+               '"/pub/ASUS/LCD Monitors/XG27ACSR/ASUS_XG27ACSR_WHQL_Driver.zip"'
+               '"https://dlcdnwebimgs.asus.com/gain/abc"')
+        self.assertEqual(find_files(raw, "https://www.asus.com/tr/x/"), self.FILES)
 
 
 class ExtractTests(unittest.TestCase):

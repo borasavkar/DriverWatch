@@ -14,7 +14,8 @@ from PyQt6.QtWidgets import (
 )
 
 from . import __version__
-from .core import KINDS, Item, Probe, Store, check_item, guess_kind, probe, system_bios, title_for
+from .core import KINDS, Item, Probe, Store, check_item, guess_kind, probe, system_bios
+from .extract import find_dates, title_for
 from .extract import anchor_from, is_newer, same_version
 from .fetch import Browser
 
@@ -170,7 +171,11 @@ class ItemDialog(QDialog):
         self.status.setStyleSheet(f"color:{C['blue']}; padding:6px 0;")
         lay.addWidget(self.status)
 
-        lay.addWidget(QLabel("<b>Sayfada bulunan sürümler</b> — takip etmek istediğinizi seçin:"))
+        self.list_hint = QLabel(
+            "<b>Sayfada bulunanlar</b> — takip etmek istediklerinizi işaretleyin (birden fazla seçebilirsiniz):"
+            if not item else "<b>Sayfada bulunanlar</b> — takip edileni seçin:"
+        )
+        lay.addWidget(self.list_hint)
         self.list = QListWidget()
         self.list.setWordWrap(True)
         self.list.currentRowChanged.connect(self._on_pick)
@@ -179,7 +184,7 @@ class ItemDialog(QDialog):
         g2 = QGridLayout()
         g2.setHorizontalSpacing(10)
         self.installed = QLineEdit(item.installed if item else "")
-        self.installed.setPlaceholderText("Bilgisayarınızda şu an yüklü olan sürüm")
+        self.installed.setPlaceholderText("Bilgisayarınızda şu an yüklü olan sürüm (tarihle takipte: yüklediğiniz dosyanın tarihi)")
         self.btn_same = QPushButton("Seçili sürüm yüklü")
         self.btn_same.setToolTip("Bilgisayarınızda bu sürüm zaten kuruluysa tıklayın")
         self.btn_same.clicked.connect(self._mark_same)
@@ -245,7 +250,30 @@ class ItemDialog(QDialog):
     def _mark_same(self):
         c = self._current()
         if c:
-            self.installed.setText(c.version)
+            self.installed.setText(fmt_date(c.version) if c.by_date else c.version)
+
+    def _checked(self) -> list:
+        if not self.result_probe:
+            return []
+        out = []
+        for r in range(self.list.count()):
+            if self.list.item(r).checkState() == Qt.CheckState.Checked:
+                out.append(self.result_probe.candidates[r])
+        return out
+
+    def _main_candidate(self):
+        """Ad / yüklü sürüm alanları listede seçili (mavi) satır içindir."""
+        c = self._current()
+        if self.item:
+            return c
+        checked = self._checked()
+        if c in checked:
+            return c
+        return checked[0] if checked else None
+
+    def _title(self, c) -> str:
+        title = (self.result_probe.page.title if self.result_probe and self.result_probe.page else "") or ""
+        return title_for(c, title[:80])
 
     def _current(self):
         r = self.list.currentRow()
@@ -258,8 +286,7 @@ class ItemDialog(QDialog):
         c = self._current()
         if not c or self.item or self.name.isModified():
             return
-        title = (self.result_probe.page.title if self.result_probe.page else "") or ""
-        t = title_for(c, title[:80])
+        t = self._title(c)
         if t:
             self.name.setText(t)
 
@@ -281,13 +308,24 @@ class ItemDialog(QDialog):
             self._set_manual_visible(True)
             return
         self.status.setText(
-            f"{len(res.candidates)} sürüm bulundu. En olası olan en üstte ve seçili; doğru değilse listeden başkasını seçin."
+            f"{len(res.candidates)} kalem bulundu. En olası olan en üstte ve işaretli; doğru değilse başkasını işaretleyin."
+            + ("" if self.item else " Ad ve yüklü sürüm alanları listede seçili (mavi) satır içindir; işaretlediğiniz diğerleri kendi adlarıyla eklenir.")
         )
         self.status.setStyleSheet(f"color:{C['green']}; padding:6px 0;")
         pre = 0
         for i, c in enumerate(res.candidates[:60]):
-            dt = f"   ·   {fmt_date(c.date)}" if c.date else ""
-            it = QListWidgetItem(f"{c.version}{dt}\n{c.context_label()}")
+            ctx = self._title(c) if (c.extra.get("src") == "data" or c.by_date) else c.context_label()
+            ctx = ctx or c.context_label()
+            if c.by_date:
+                head = f"{fmt_date(c.date)}   ·   sürüm numarası yok, yayın tarihiyle takip edilir"
+            else:
+                head = c.version + (f"   ·   {fmt_date(c.date)}" if c.date else "")
+            if c.link:
+                head += "   ·   indirme linki bulundu"
+            it = QListWidgetItem(f"{head}\n{ctx}")
+            if not self.item:
+                it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                it.setCheckState(Qt.CheckState.Checked if i == 0 else Qt.CheckState.Unchecked)
             f = it.font()
             f.setPointSize(10)
             it.setFont(f)
@@ -297,16 +335,45 @@ class ItemDialog(QDialog):
         self.list.setCurrentRow(pre)
 
     def _save(self):
+        if self.result_probe and self.result_probe.candidates and not self.item and not self._checked():
+            QMessageBox.information(self, "Seçim yok", "Takip etmek istediğiniz en az bir kalemi işaretleyin.")
+            return
         if not self.name.text().strip():
             self.name.setText(self.url[:80])
         self.accept()
+
+    @staticmethod
+    def _norm_installed(text: str, c) -> str:
+        text = text.strip()
+        if c is not None and c.by_date and text:
+            ds = find_dates(text)
+            if ds:
+                return ds[0][2].isoformat()
+        return text
+
+    def extra_items(self) -> list[Item]:
+        """İşaretlenen diğer kalemler için ayrı kayıtlar."""
+        main = self._main_candidate()
+        out = []
+        for c in self._checked():
+            if c is main:
+                continue
+            it = Item(url=self.url, name=self._title(c) or self.name.text().strip(), kind=self.kind.currentText())
+            it.anchor = anchor_from(c)
+            it.latest, it.latest_date, it.link = c.version, c.date, c.link
+            it.last_checked = datetime.now().isoformat(timespec="seconds")
+            it.recompute_state()
+            out.append(it)
+        return out
 
     def apply_to(self, item: Item) -> Item:
         item.name = self.name.text().strip()
         item.kind = self.kind.currentText()
         item.installed_auto = self.auto_bios.isVisible() and self.auto_bios.isChecked()
-        item.installed = self.installed.text().strip()
-        c = self._current()
+        c = self._main_candidate()
+        if c is not None and c is not self._current() and not self.name.isModified():
+            item.name = self._title(c) or item.name
+        item.installed = self._norm_installed(self.installed.text(), c)
         if c:
             item.anchor = anchor_from(c)
             item.latest, item.latest_date, item.link = c.version, c.date, c.link
@@ -361,15 +428,20 @@ class Card(QFrame):
         # sürümler
         row = QHBoxLayout()
         row.setSpacing(12)
-        inst_txt = item.installed or "—"
+        by_date = item.anchor.get("shape") == "date"
+        inst_txt = (fmt_date(item.installed) if by_date else item.installed) or "—"
         inst_sub = "bilgisayardan okundu" if item.installed_auto else ("girilmedi" if not item.installed else "")
-        row.addWidget(self._vbox("YÜKLÜ SÜRÜM", inst_txt, inst_sub, C["text"]))
+        row.addWidget(self._vbox("YÜKLEDİĞİNİZ DOSYANIN TARİHİ" if by_date else "YÜKLÜ SÜRÜM", inst_txt, inst_sub, C["text"]))
         arrow = QLabel("→")
         arrow.setStyleSheet(f"font-size:20pt; color:{fg if state=='update' else C['muted']};")
         row.addWidget(arrow)
         latest_color = C["red"] if state == "update" else (C["green"] if state == "ok" else C["text"])
-        row.addWidget(self._vbox("SİTEDEKİ EN YENİ", item.latest or "—",
-                                 ("yayın: " + fmt_date(item.latest_date)) if item.latest_date else "", latest_color))
+        if by_date:
+            row.addWidget(self._vbox("SİTEDEKİ EN YENİ TARİH", fmt_date(item.latest) or "—",
+                                     "sürüm numarası yok, tarihle takip", latest_color))
+        else:
+            row.addWidget(self._vbox("SİTEDEKİ EN YENİ", item.latest or "—",
+                                     ("yayın: " + fmt_date(item.latest_date)) if item.latest_date else "", latest_color))
         row.addStretch(1)
         v.addLayout(row)
 
@@ -584,12 +656,17 @@ class MainWindow(QMainWindow):
         if not url.lower().startswith(("http://", "https://")):
             url = "https://" + url
         if self.store.has_url(url):
-            QMessageBox.information(self, "Zaten listede", "Bu link zaten takip listesinde.")
-            return
+            r = QMessageBox.question(
+                self, "Bu sayfa zaten listede",
+                "Bu sayfadan takip ettiğiniz bir kalem var. Aynı sayfadaki başka bir dosyayı da eklemek ister misiniz?",
+            )
+            if r != QMessageBox.StandardButton.Yes:
+                return
         dlg = ItemDialog(self, url)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             item = dlg.apply_to(Item(url=url))
             self.store.items.append(item)
+            self.store.items.extend(dlg.extra_items())
             self.store.save()
             self.url.clear()
             self.render()
@@ -690,6 +767,26 @@ def run(argv: list[str]) -> int:
         i = argv.index("--import")
         n = store.import_legacy(Path(argv[i + 1]))
         print(f"{n} link içe aktarıldı → {store.path}")
+        return 0
+    if "--selftest" in argv:
+        # Tanı için: verilen sayfayı Chrome dahil okuyup sonucu dosyaya yazar (exe'de konsol yok)
+        i = argv.index("--selftest")
+        url, out = argv[i + 1], Path(argv[i + 2])
+        from .fetch import Browser as _B
+        b = _B()
+        try:
+            lines = []
+            try:
+                pg = b.fetch(url)
+                lines.append(f"chrome ok, {len(pg.text)} karakter")
+            except Exception as e:  # noqa: BLE001
+                lines.append(f"chrome HATA: {e}")
+            p = probe(url, b)
+            lines.append(f"aday: {len(p.candidates)} hata: {p.error}")
+            lines += [f"{c.version} {c.date} {c.link}" for c in p.candidates[:5]]
+        finally:
+            b.close()
+        out.write_text("\n".join(lines), encoding="utf-8")
         return 0
     app = QApplication(argv)
     app.setStyle("Fusion")
