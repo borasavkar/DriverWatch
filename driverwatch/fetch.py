@@ -114,7 +114,12 @@ def find_files(raw: str, page_url: str) -> list[str]:
         # aynı ilk klasörle başlayan mutlak adresler hangi sunucudaysa onu kullan (/pub/… → dlcdnets)
         first = "/" + path.strip("/").split("/", 1)[0] + "/"
         same = re.findall(r"https?://([a-z0-9.-]+)" + re.escape(first), raw, re.I)
-        base = f"https://{max(set(same), key=same.count).lower()}" if same else fallback
+        if same:
+            base = f"https://{max(set(same), key=same.count).lower()}"
+        elif first == "/pub/" and pu.netloc.endswith("asus.com"):
+            base = "https://dlcdnets.asus.com"  # ASUS'un dosya sunucusu (ROG sayfaları adresi yazmıyor)
+        else:
+            base = fallback
         out.append(base + quote(path, safe="/-_.~%"))
     seen, uniq = set(), []
     for f in out:
@@ -150,10 +155,16 @@ def fetch_http(url: str, timeout: int = 20) -> Page:
 _API_HINT = re.compile(r"bios|driver|firmware|download|support|software|utility|file", re.I)
 
 
-def fetch_api_texts(urls: list[str], limit: int = 8) -> str:
+_API_STRONG = re.compile(r"bios|driver|firmware|download|file", re.I)
+
+
+def fetch_api_texts(urls: list[str], limit: int = 12) -> str:
     """Sayfanın yüklediği, indirmeyle ilgili görünen veri yanıtlarını metin olarak döndür."""
     out = []
-    for u in [u for u in urls if _API_HINT.search(u)][:limit]:
+    picked = [u for u in urls if _API_STRONG.search(u)] + [
+        u for u in urls if _API_HINT.search(u) and not _API_STRONG.search(u)
+    ]
+    for u in list(dict.fromkeys(picked))[:limit]:
         try:
             r = requests.get(u, headers={"User-Agent": UA}, timeout=10)
         except requests.RequestException:
@@ -161,6 +172,61 @@ def fetch_api_texts(urls: list[str], limit: int = 8) -> str:
         if r.ok and len(r.content) < 3_000_000 and "json" in r.headers.get("content-type", "") + u.lower():
             out.append(r.text)
     return "\n".join(out)
+
+
+_OS_PROMPT = re.compile(
+    r"işletim sistemi(ni)? seç|select (your |an )?(os|operating system)|choose (your )?(os|operating system)",
+    re.IGNORECASE,
+)
+
+
+def _os_wanted() -> tuple[str, str]:
+    """Bu bilgisayarın sistemi: ('Windows 11', '64') gibi."""
+    import platform
+    import sys as _sys
+
+    name = "Windows"
+    if _sys.platform == "win32":
+        try:
+            build = int(platform.version().split(".")[-1])
+        except ValueError:
+            build = 0
+        name = "Windows 11" if build >= 22000 else "Windows 10"
+    bits = "64" if platform.machine().endswith("64") else "32"
+    return name, bits
+
+
+# Sayfadaki işletim sistemi seçeneklerinden (option / li / role=option) bu bilgisayara uyanı seçer.
+_PICK_OS_JS = r"""
+const want = arguments[0].toLowerCase(), bits = arguments[1];
+const norm = s => (s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+const score = t => {
+  if (!t.startsWith(want.split(' ')[0]) || t.length > 40) return -1;
+  let s = 0;
+  if (t.includes(want)) s += 10;
+  if (t.includes(bits)) s += 3;
+  if (/(32|x86)/.test(t) && bits === '64') s -= 5;
+  return s;
+};
+for (const sel of document.querySelectorAll('select')) {
+  let best = null, bs = 0;
+  for (const o of sel.options) { const s = score(norm(o.text)); if (s > bs) { bs = s; best = o; } }
+  if (best) { sel.value = best.value; sel.dispatchEvent(new Event('change', {bubbles: true})); return true; }
+}
+let best = null, bs = 0;
+for (const el of document.querySelectorAll('li, [role=option]')) {
+  const s = score(norm(el.textContent));
+  if (s > bs) { bs = s; best = el; }
+}
+if (!best) return false;
+// açılır listeyi aç (bazı siteler kapalıyken tıklamayı dinlemez), sonra seçeneğe tıkla
+let box = best.closest('ul, [role=listbox]');
+const opener = box && box.parentElement && box.parentElement.previousElementSibling;
+if (opener) opener.click();
+if (box && box.parentElement) box.parentElement.style.display = 'block';
+best.click();
+return true;
+"""
 
 
 class Browser:
@@ -237,6 +303,21 @@ class Browser:
             if stable >= 2 and time.time() - t0 > 3:
                 break
         text = d.execute_script("return document.body ? document.body.innerText : ''") or ""
+        # "Lütfen işletim sistemi seçin" diyen sayfalarda (ör. ASUS/ROG) liste seçim yapılmadan gelmez:
+        # bu bilgisayarın sistemine uyan seçeneği seç ve listenin yüklenmesini bekle.
+        if _OS_PROMPT.search(text):
+            try:
+                if d.execute_script(_PICK_OS_JS, *_os_wanted()):
+                    t1, last = time.time(), len(text)
+                    while time.time() - t1 < settle:
+                        time.sleep(1.0)
+                        n = d.execute_script("return document.body ? document.body.innerText.length : 0")
+                        if n != last and time.time() - t1 > 2:
+                            time.sleep(2.0)
+                            break
+                    text = d.execute_script("return document.body ? document.body.innerText : ''") or ""
+            except Exception:  # noqa: BLE001
+                pass
         title = d.title or ""
         links = d.execute_script(
             "return Array.from(document.querySelectorAll('a[href]')).map(a=>[((a.innerText||'')+' '+(a.getAttribute('aria-label')||'')).trim(), a.href]);"
@@ -251,8 +332,10 @@ class Browser:
                 "return performance.getEntriesByType('resource')"
                 ".filter(r=>r.initiatorType==='xmlhttprequest'||r.initiatorType==='fetch').map(r=>r.name)"
             ) or []
-            src += "\n" + fetch_api_texts(api)
-            files, data = find_files(src, d.current_url or url), data_text_of(src)
+            api_text = fetch_api_texts(api)
+            src += "\n" + api_text
+            files = find_files(src, d.current_url or url)
+            data = data_text_of(src) + "\n" + data_text_of("<script>" + api_text + " " * 2000 + "</script>")
         except Exception:  # noqa: BLE001
             files, data = [], ""
         return Page(

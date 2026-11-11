@@ -210,6 +210,8 @@ def title_for(c: "Candidate", page_title: str = "") -> str:
             or _SIZE_LINE.match(low)
             or find_dates(line)
             or low.endswith(" -")
+            or _URL.match(low)
+            or re.fullmatch(r"[0-9a-f]{32,}|[\d@\-_.]+", low)
         ):
             continue
         return line[:80] if len(line) < 70 else page_title
@@ -362,13 +364,33 @@ def page_candidates(text: str, links, files, data_text: str = "") -> list[Candid
     cands = extract_candidates(text, links, files)
     if not data_text:
         return cands
+    # Linki bulunamayan kalemler: gömülü veride başlığın hemen ardından gelen adresi al
+    dlines = data_text.split("\n")
+    for c in cands:
+        if c.link:
+            continue
+        t = title_for(c)
+        if len(_norm(t)) < 6:
+            continue
+        for k, line in enumerate(dlines):
+            if line.strip() == t:
+                for nxt in dlines[k + 1:k + 15]:
+                    um = _URL.match(nxt.strip())
+                    if um:
+                        c.link = um.group(0)
+                        break
+                if c.link:
+                    break
     have = {_norm(title_for(c)) for c in cands}
     have_v = {c.version for c in cands}
     extra = []
     for c in extract_candidates(data_text, links, files):
-        t = _norm(title_for(c))
+        raw_t = title_for(c)
+        t = _norm(raw_t)
         if not c.date or len(t) < 6 or t in have or (c.version in have_v and not c.by_date):
             continue
+        if re.fullmatch(r"[A-Za-z]+", raw_t):
+            continue  # "FileSize", "ReleaseDate" gibi veri alan adları kalem değildir
         have.add(t)
         c.extra["src"] = "data"
         c.score -= 1.5
