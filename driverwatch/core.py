@@ -32,6 +32,8 @@ class Item:
     kind: str = "Sürücü"
     installed: str = ""
     installed_auto: bool = False  # BIOS: yüklü sürümü bilgisayardan oku
+    installed_app: str = ""  # Windows "Yüklü uygulamalar" listesindeki ad; sürüm her kontrolde oradan okunur
+    via: str = ""  # son kontrolde sayfa nasıl okundu: http | chrome | chrome-kimlik
     latest: str = ""
     latest_date: str = ""
     link: str = ""
@@ -59,7 +61,7 @@ class Store:
     def __init__(self, path: Path | None = None):
         self.path = path or (data_dir() / "items.json")
         self.items: list[Item] = []
-        self.settings: dict = {"check_on_start": True}
+        self.settings: dict = {"check_on_start": True, "identity_fallback": True}
         self.load()
 
     def load(self):
@@ -159,6 +161,71 @@ def system_bios() -> dict:
     return info
 
 
+_prog_cache: dict[str, str] | None = None
+_GENERIC_WORDS = {
+    "driver", "drivers", "software", "the", "for", "and", "download", "downloads", "package", "update",
+    "utility", "tool", "tools", "windows", "win", "bit", "x64", "64", "latest", "version", "sürücü",
+}
+
+
+def installed_programs(refresh: bool = False) -> dict[str, str]:
+    """Windows'un 'Yüklü uygulamalar' listesi: {ad: sürüm}."""
+    global _prog_cache
+    if _prog_cache is not None and not refresh:
+        return _prog_cache
+    out: dict[str, str] = {}
+    if os.name == "nt":
+        import winreg
+
+        roots = [
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+            (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+        ]
+        for hive, path in roots:
+            try:
+                root = winreg.OpenKey(hive, path)
+            except OSError:
+                continue
+            for i in range(winreg.QueryInfoKey(root)[0]):
+                try:
+                    sub = winreg.OpenKey(root, winreg.EnumKey(root, i))
+                    name = str(winreg.QueryValueEx(sub, "DisplayName")[0]).strip()
+                    ver = str(winreg.QueryValueEx(sub, "DisplayVersion")[0]).strip()
+                except OSError:
+                    continue
+                if name and ver and name not in out:
+                    out[name] = ver
+    _prog_cache = dict(sorted(out.items(), key=lambda kv: kv[0].lower()))
+    return _prog_cache
+
+
+def _words(s: str) -> set[str]:
+    import re
+
+    return {w for w in re.split(r"[^0-9a-zçğıöşü]+", s.lower()) if len(w) >= 3 and w not in _GENERIC_WORDS}
+
+
+def suggest_program(name: str, latest: str = "", programs: dict[str, str] | None = None) -> str:
+    """Kaydın adına en çok benzeyen yüklü program ('AMD Chipset Drivers' → 'AMD Chipset Software')."""
+    programs = installed_programs() if programs is None else programs
+    want = _words(name)
+    if len(want) < 2:
+        return ""
+    best, best_key = "", (0, 0, 0)
+    for prog, ver in programs.items():
+        have = _words(prog)
+        common = len(want & have)
+        if common < 2:
+            continue
+        # aynı biçimde sürüm (aynı sayıda nokta) olanı ve sitedekiyle aynı ya da daha eski olanı öne al
+        same_shape = int(bool(latest) and ver.count(".") == latest.count("."))
+        key = (common, same_shape, -len(have - want))
+        if key > best_key:
+            best, best_key = prog, key
+    return best
+
+
 # ---------------------------------------------------------------- kontrol
 
 @dataclass
@@ -213,8 +280,13 @@ def check_item(item: Item, browser: Browser) -> Item:
         v = system_bios().get("version")
         if v:
             item.installed = v
+    elif item.installed_app:
+        v = installed_programs().get(item.installed_app)
+        if v:
+            item.installed = v
     item.last_checked = datetime.now().isoformat(timespec="seconds")
     p = probe(item.url, browser, need_chrome_if_empty=False)
+    item.via = p.page.via if p.page else ""
     page_title = p.page.title[:80] if p.page and p.page.title and not p.blocked else ""
     if p.blocked or (p.error and not p.candidates):
         item.name = item.name or page_title or name_from_url(item.url)
@@ -229,6 +301,7 @@ def check_item(item: Item, browser: Browser) -> Item:
                 page = browser.fetch(item.url)
                 cands = page_candidates(page.text, page.links, page.files, page.data_text)
                 chosen, conf = pick_tracked(cands, item.anchor)
+                item.via = page.via
             except FetchError:
                 chosen = None
     if chosen is None:

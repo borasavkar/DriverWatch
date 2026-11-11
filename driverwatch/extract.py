@@ -413,6 +413,8 @@ def _score(c: Candidate, line: str, prev: str) -> float:
             s += 1
     if len(line) <= len(c.version) + 40:
         s += 1  # kısa satır: büyük olasılıkla bir başlık/etiket
+    if re.search(r"\bbeta\b|\balpha\b|\bpreview\b|\btest\b", line, re.IGNORECASE):
+        s -= 3  # kararlı sürüm önce gelsin
     s -= min(c.index, 40) * 0.03
     return s
 

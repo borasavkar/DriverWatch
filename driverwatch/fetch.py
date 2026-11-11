@@ -164,31 +164,65 @@ def fetch_api_texts(urls: list[str], limit: int = 8) -> str:
 
 
 class Browser:
-    """Tek bir görünmez Chrome örneği; yalnızca gerektiğinde açılır."""
+    """Görünmez Chrome; yalnızca gerektiğinde açılır.
 
-    def __init__(self):
+    allow_identity açıksa ve bir site görünmez Chrome'u reddederse ("HeadlessChrome" kimliği),
+    sayfa bir kez daha, Chrome'un kendisini normal masaüstü Chrome olarak tanıttığı ikinci bir
+    örnekle açılır (eski Gemini uygulamasının kullandığı yöntem). Kullanıcı ayarlardan kapatabilir.
+    """
+
+    def __init__(self, allow_identity: bool = False):
+        self.allow_identity = allow_identity
         self._driver = None
+        self._driver_id = None
+        self._version = ""
 
-    def _ensure(self):
+    def _start(self, identity: bool):
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options
+
+        o = Options()
+        o.add_argument("--headless=new")
+        o.add_argument("--window-size=1600,1000")
+        o.add_argument("--log-level=3")
+        if identity:
+            ver = self._version or "130.0.0.0"
+            o.add_argument(
+                f"--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                f"(KHTML, like Gecko) Chrome/{ver} Safari/537.36"
+            )
+        try:
+            d = webdriver.Chrome(options=o)
+        except Exception as e:  # noqa: BLE001
+            raise FetchError(
+                "Chrome başlatılamadı. Google Chrome kurulu mu? (" + str(e).splitlines()[0][:120] + ")"
+            ) from e
+        d.set_page_load_timeout(45)
+        if not self._version:
+            # kurulu Chrome'un gerçek sürümü; kimlikte de bu kullanılır
+            self._version = (d.capabilities or {}).get("browserVersion", "") or ""
+        return d
+
+    def _ensure(self, identity: bool = False):
+        if identity:
+            if self._driver_id is None:
+                if not self._version:
+                    self._ensure(False)
+                self._driver_id = self._start(True)
+            return self._driver_id
         if self._driver is None:
-            from selenium import webdriver
-            from selenium.webdriver.chrome.options import Options
-
-            o = Options()
-            o.add_argument("--headless=new")
-            o.add_argument("--window-size=1600,1000")
-            o.add_argument("--log-level=3")
-            try:
-                self._driver = webdriver.Chrome(options=o)
-            except Exception as e:  # noqa: BLE001
-                raise FetchError(
-                    "Chrome başlatılamadı. Google Chrome kurulu mu? (" + str(e).splitlines()[0][:120] + ")"
-                ) from e
-            self._driver.set_page_load_timeout(45)
+            self._driver = self._start(False)
         return self._driver
 
     def fetch(self, url: str, settle: float = 15.0) -> Page:
-        d = self._ensure()
+        try:
+            return self._fetch_with(self._ensure(False), url, settle, "chrome")
+        except BlockedError:
+            if not self.allow_identity:
+                raise
+        return self._fetch_with(self._ensure(True), url, settle, "chrome-kimlik")
+
+    def _fetch_with(self, d, url: str, settle: float, via: str) -> Page:
         try:
             d.get(url)
         except Exception as e:  # noqa: BLE001
@@ -222,14 +256,17 @@ class Browser:
         except Exception:  # noqa: BLE001
             files, data = [], ""
         return Page(
-            url=url, title=title, text=text, links=[tuple(x) for x in links], via="chrome",
+            url=url, title=title, text=text, links=[tuple(x) for x in links], via=via,
             files=files, data_text=data,
         )
 
     def close(self):
-        if self._driver is not None:
-            try:
-                self._driver.quit()
-            except Exception:  # noqa: BLE001
-                pass
-            self._driver = None
+        for d in (self._driver, self._driver_id):
+            if d is not None:
+                try:
+                    d.quit()
+                except Exception:  # noqa: BLE001
+                    pass
+        self._driver = self._driver_id = None
+
+

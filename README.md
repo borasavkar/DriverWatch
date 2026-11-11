@@ -18,6 +18,7 @@ BIOS, sürücü ve firmware sayfalarını takip eden küçük bir Windows uygula
 - **Sürüm numarası olmayan dosyaları tarihle takip eder.** Bazı sayfalarda (ör. ASUS monitör sürücüleri) yalnızca “Sürüm -” ve yayın tarihi yazar; bu kalemler yayın tarihine göre izlenir, daha yeni tarihli dosya çıkınca “YENİ SÜRÜM VAR” görünür.
 - **Aynı sayfadan birden fazla dosya.** Ekleme penceresinde istediğiniz kadar kalemi işaretlersiniz; her biri ayrı kart olur.
 - **Gizli indirme linklerini bulur.** “İndir” düğmesi gerçek bir link değilse, sayfanın içindeki veride duran dosya adresi aranır.
+- **Yüklü sürümü Windows'tan okur.** Ekleme penceresindeki “Windows'tan oku” listesinden, Windows'un “Yüklü uygulamalar” listesindeki bir kayıt seçilir (ör. *AMD Chipset Software — 8.09.28.1124*); program uygun olanı kendisi önerir. Yüklü sürüm her kontrolde yeniden okunur, kurulum yapınca kart kendiliğinden “GÜNCEL”e döner. Monitör ya da oyun kolu firmware'i Windows'ta görünmediği için bunlarda “Yükledim ✓” düğmesi kullanılır.
 - **BIOS sürümünü bilgisayardan okur.** BIOS kayıtlarında yüklü sürüm Windows'tan alınır. MSI'nin sitedeki `7E16v1D4` ile Windows'un gösterdiği `1.D4` aynı sürüm sayılır.
 - **"Yükledim ✓" düğmesi.** Yeni sürümü kurduktan sonra tek tıkla yüklü sürümü günceller.
 - **İndirme linki.** Sayfada sürüme ait doğrudan link bulunursa “İndir” düğmesi çıkar.
@@ -26,7 +27,8 @@ BIOS, sürücü ve firmware sayfalarını takip eden küçük bir Windows uygula
 
 ## Sınırlar
 
-- Bazı üreticiler (ör. MSI) sitelerine otomatik erişimi engelliyor. Bu durumda kart **SİTE ENGELLİYOR** gösterir; “Sayfayı aç” ile kendiniz bakar, gördüğünüz sürümü “Düzenle → En yeni (elle)” alanına yazarsınız. Program bu engeli aşmaya çalışmaz.
+- Bazı üreticiler (ör. MSI) görünmez Chrome'u (“HeadlessChrome”) reddediyor. **“Engelleyen sitelerde normal tarayıcı kimliği kullan”** seçeneği açıkken (varsayılan), program yalnızca bu sitelerde sayfayı bir kez daha, Chrome kendini normal masaüstü Chrome olarak tanıtarak açar; kartta “tarayıcı kimliğiyle okundu” yazar. Bu, sitenin kurallarına aykırı olabilir ve site korumasını değiştirirse çalışmayabilir; istemezseniz seçeneği kapatın. Kapalıyken ya da yine engellenirse kart **SİTE ENGELLİYOR** gösterir ve sürüm “Düzenle → En yeni (elle)” ile girilir.
+- Beta sürümler listede kararlı sürümlerin altında gösterilir; kararlı sürümü takip eden kayıt betalarla karışmaz.
 - JavaScript ile yüklenen sayfalar için Google Chrome kurulu olmalıdır (görünmez pencerede açılır).
 - Sürücülerin yüklü sürümünü otomatik okumaz; ilk eklerken siz girersiniz ya da “Seçili sürüm yüklü” / “Yükledim ✓” düğmelerini kullanırsınız.
 

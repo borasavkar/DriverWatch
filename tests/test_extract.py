@@ -137,6 +137,27 @@ class LabeledVersionTests(unittest.TestCase):
         self.assertTrue(is_newer("MCM103", "MCM102"))
 
 
+MSI_BETA = """AMI BIOS
+{beta}(Beta version)
+Release Date
+2026-03-04
+Download
+AMI BIOS
+{stable}
+Release Date
+2026-09-09
+Download
+"""
+
+
+class BetaTests(unittest.TestCase):
+    def test_stable_first_and_tracked_separately_from_beta(self):
+        c = extract_candidates(MSI_BETA.format(beta="7E16v1CB", stable="7E16v1D4"))
+        self.assertEqual(c[0].version, "7E16v1D4")
+        picked, _ = pick_tracked(extract_candidates(MSI_BETA.format(beta="7E16v1D51", stable="7E16v1D5")), anchor_from(c[0]))
+        self.assertEqual(picked.version, "7E16v1D5")
+
+
 class ExtractTests(unittest.TestCase):
     def test_amd_finds_chipset_first_and_skips_file_size(self):
         c = extract_candidates(AMD.format(chip="8.09.28.1124", chipdate="2026-10-21"))

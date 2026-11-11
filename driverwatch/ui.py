@@ -14,7 +14,9 @@ from PyQt6.QtWidgets import (
 )
 
 from . import __version__
-from .core import KINDS, Item, Probe, Store, check_item, guess_kind, probe, system_bios
+from .core import (
+    KINDS, Item, Probe, Store, check_item, guess_kind, installed_programs, probe, suggest_program, system_bios,
+)
 from .extract import find_dates, title_for
 from .extract import anchor_from, is_newer, same_version
 from .fetch import Browser
@@ -98,7 +100,8 @@ class CheckWorker(QThread):
         self.store, self.ids = store, ids
 
     def run(self):
-        browser = Browser()
+        installed_programs(refresh=True)  # kurulumdan sonra yeni sürüm görünsün
+        browser = Browser(allow_identity=bool(self.store.settings.get("identity_fallback", True)))
         try:
             for item_id in self.ids:
                 item = self.store.get(item_id)
@@ -118,12 +121,12 @@ class CheckWorker(QThread):
 class ProbeWorker(QThread):
     finished_probe = pyqtSignal(object)
 
-    def __init__(self, url: str):
+    def __init__(self, url: str, allow_identity: bool = True):
         super().__init__()
-        self.url = url
+        self.url, self.allow_identity = url, allow_identity
 
     def run(self):
-        browser = Browser()
+        browser = Browser(allow_identity=self.allow_identity)
         try:
             res = probe(self.url, browser)
         except Exception as e:  # noqa: BLE001
@@ -188,15 +191,28 @@ class ItemDialog(QDialog):
         self.btn_same = QPushButton("Seçili sürüm yüklü")
         self.btn_same.setToolTip("Bilgisayarınızda bu sürüm zaten kuruluysa tıklayın")
         self.btn_same.clicked.connect(self._mark_same)
-        self.auto_bios = QCheckBox("Yüklü BIOS sürümünü her kontrolde bilgisayardan oku")
-        self.auto_bios.setChecked(item.installed_auto if item else False)
-        self.auto_bios.toggled.connect(self._on_auto)
+        # Yüklü sürüm nereden okunsun: elle / BIOS / Windows'taki yüklü program
+        self.source = QComboBox()
+        self.source.addItem("Elle gireceğim (ya da kurunca “Yükledim ✓” derim)", ("manual", ""))
+        if system_bios().get("version"):
+            self.source.addItem(f"BIOS — bilgisayardan oku ({system_bios()['version']})", ("bios", ""))
+        for prog, ver in installed_programs().items():
+            self.source.addItem(f"{prog} — {ver}", ("app", prog))
+        self.source.setToolTip("Seçerseniz yüklü sürüm her kontrolde Windows'tan okunur; kurulum yapınca kart kendiliğinden güncellenir.")
+        self._source_touched = False
+        self.source.activated.connect(lambda *_: setattr(self, "_source_touched", True))
+        self.source.currentIndexChanged.connect(self._on_source)
+        if item and item.installed_auto:
+            self._select_source("bios", "")
+        elif item and item.installed_app:
+            self._select_source("app", item.installed_app)
         self.manual_latest = QLineEdit(item.latest if item else "")
         self.manual_latest.setPlaceholderText("Site engelliyorsa sitede gördüğünüz en yeni sürümü buraya yazabilirsiniz")
         g2.addWidget(QLabel("Yüklü sürüm"), 0, 0)
         g2.addWidget(self.installed, 0, 1)
         g2.addWidget(self.btn_same, 0, 2)
-        g2.addWidget(self.auto_bios, 1, 1, 1, 2)
+        g2.addWidget(QLabel("Windows'tan oku"), 1, 0)
+        g2.addWidget(self.source, 1, 1, 1, 2)
         g2.addWidget(QLabel("En yeni (elle)"), 2, 0)
         g2.addWidget(self.manual_latest, 2, 1, 1, 2)
         g2.setColumnStretch(1, 1)
@@ -224,7 +240,8 @@ class ItemDialog(QDialog):
         self.kind.currentTextChanged.connect(self._on_kind)
         self._set_manual_visible(bool(item and item.state == "blocked"))
 
-        self.worker = ProbeWorker(url)
+        st = getattr(parent, "store", None)
+        self.worker = ProbeWorker(url, bool(st.settings.get("identity_fallback", True)) if st else True)
         self.worker.finished_probe.connect(self._on_probe)
         self.worker.start()
 
@@ -233,19 +250,38 @@ class ItemDialog(QDialog):
         self.manual_latest.setVisible(v)
         self.lbl_manual.setVisible(v)
 
+    def _select_source(self, kind: str, name: str) -> bool:
+        for i in range(self.source.count()):
+            if self.source.itemData(i) == (kind, name):
+                self.source.setCurrentIndex(i)
+                return True
+        return False
+
     def _on_kind(self, *_):
         is_bios = self.kind.currentText() == "BIOS" and bool(system_bios().get("version"))
-        self.auto_bios.setVisible(is_bios)
-        if not is_bios:
-            self.auto_bios.setChecked(False)
-        elif not self.item:
-            self.auto_bios.setChecked(True)
+        kind, _n = self.source.currentData()
+        if is_bios and not self.item and not self._source_touched:
+            self._select_source("bios", "")
+        elif not is_bios and kind == "bios":
+            self._select_source("manual", "")
 
-    def _on_auto(self, on: bool):
-        if on:
+    def _on_source(self, *_):
+        kind, name = self.source.currentData()
+        if kind == "bios":
             self.installed.setText(system_bios().get("version", ""))
-        self.installed.setReadOnly(on)
-        self.btn_same.setEnabled(not on)
+        elif kind == "app":
+            self.installed.setText(installed_programs().get(name, ""))
+        auto = kind != "manual"
+        self.installed.setReadOnly(auto)
+        self.btn_same.setEnabled(not auto)
+
+    def _suggest_source(self, c):
+        """Seçilen kalemin adına uyan yüklü programı öner (kullanıcı kendisi seçmediyse)."""
+        if self._source_touched or self.kind.currentText() == "BIOS":
+            return
+        prog = suggest_program(self._title(c) or self.name.text(), "" if c.by_date else c.version)
+        if not (prog and self._select_source("app", prog)):
+            self._select_source("manual", "")
 
     def _mark_same(self):
         c = self._current()
@@ -289,6 +325,7 @@ class ItemDialog(QDialog):
         t = self._title(c)
         if t:
             self.name.setText(t)
+        self._suggest_source(c)
 
     def _on_probe(self, res: Probe):
         self.result_probe = res
@@ -359,6 +396,9 @@ class ItemDialog(QDialog):
             if c is main:
                 continue
             it = Item(url=self.url, name=self._title(c) or self.name.text().strip(), kind=self.kind.currentText())
+            prog = "" if c.by_date else suggest_program(it.name, c.version)
+            if prog:
+                it.installed_app, it.installed = prog, installed_programs().get(prog, "")
             it.anchor = anchor_from(c)
             it.latest, it.latest_date, it.link = c.version, c.date, c.link
             it.last_checked = datetime.now().isoformat(timespec="seconds")
@@ -369,7 +409,9 @@ class ItemDialog(QDialog):
     def apply_to(self, item: Item) -> Item:
         item.name = self.name.text().strip()
         item.kind = self.kind.currentText()
-        item.installed_auto = self.auto_bios.isVisible() and self.auto_bios.isChecked()
+        kind, prog = self.source.currentData()
+        item.installed_auto = kind == "bios"
+        item.installed_app = prog if kind == "app" else ""
         c = self._main_candidate()
         if c is not None and c is not self._current() and not self.name.isModified():
             item.name = self._title(c) or item.name
@@ -430,7 +472,11 @@ class Card(QFrame):
         row.setSpacing(12)
         by_date = item.anchor.get("shape") == "date"
         inst_txt = (fmt_date(item.installed) if by_date else item.installed) or "—"
-        inst_sub = "bilgisayardan okundu" if item.installed_auto else ("girilmedi" if not item.installed else "")
+        inst_sub = (
+            "bilgisayardan okundu" if item.installed_auto
+            else "Windows'tan okundu" if item.installed_app
+            else ("girilmedi" if not item.installed else "")
+        )
         row.addWidget(self._vbox("YÜKLEDİĞİNİZ DOSYANIN TARİHİ" if by_date else "YÜKLÜ SÜRÜM", inst_txt, inst_sub, C["text"]))
         arrow = QLabel("→")
         arrow.setStyleSheet(f"font-size:20pt; color:{fg if state=='update' else C['muted']};")
@@ -455,7 +501,8 @@ class Card(QFrame):
         bot = QHBoxLayout()
         meta = QLabel(
             f"<span style='color:{C['muted']}'>Son kontrol: {fmt_date(item.last_checked) or 'hiç'}"
-            f" · {self._short(item.url)}</span>"
+            + (" · tarayıcı kimliğiyle okundu" if item.via == "chrome-kimlik" else "")
+            + f" · {self._short(item.url)}</span>"
         )
         meta.setToolTip(item.url)
         meta.setWordWrap(True)
@@ -475,7 +522,7 @@ class Card(QFrame):
                 b_dl.setObjectName("dl")
             b_dl.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(item.link)))
             bot.addWidget(b_dl)
-        if state in ("update", "noinstalled") and item.latest and not item.installed_auto:
+        if state in ("update", "noinstalled") and item.latest and not item.installed_auto and not item.installed_app:
             b_inst = QPushButton("Yükledim ✓")
             b_inst.setObjectName("good")
             b_inst.setToolTip(f"Yüklü sürümü {item.latest} olarak işaretle")
@@ -571,8 +618,16 @@ class MainWindow(QMainWindow):
         b_imp = QPushButton("Eski listeyi içe aktar…")
         b_imp.setToolTip("Eski uygulamanın tracker_data.json dosyasındaki linkleri ekler")
         b_imp.clicked.connect(self.import_legacy)
+        self.cb_ident = QCheckBox("Engelleyen sitelerde normal tarayıcı kimliği kullan")
+        self.cb_ident.setToolTip(
+            "Bazı siteler (ör. MSI) görünmez Chrome'u reddediyor. Açıkken bu sitelerde Chrome kendini normal "
+            "masaüstü Chrome olarak tanıtır. Site kurallarına aykırı olabilir; istemezseniz kapatın."
+        )
+        self.cb_ident.setChecked(bool(self.store.settings.get("identity_fallback", True)))
+        self.cb_ident.toggled.connect(self._toggle_ident)
         bar.addWidget(self.b_all)
         bar.addWidget(self.progress, 1)
+        bar.addWidget(self.cb_ident)
         bar.addWidget(self.cb_start)
         bar.addWidget(b_imp)
         v.addLayout(bar)
@@ -645,6 +700,10 @@ class MainWindow(QMainWindow):
         )
 
     # -- eylemler
+    def _toggle_ident(self, on: bool):
+        self.store.settings["identity_fallback"] = on
+        self.store.save()
+
     def _toggle_start(self, on: bool):
         self.store.settings["check_on_start"] = on
         self.store.save()
@@ -795,6 +854,18 @@ def run(argv: list[str]) -> int:
     ico = resource("icon.ico")
     if Path(ico).exists():
         app.setWindowIcon(QIcon(ico))
+    # Aynı anda iki pencere açıksa biri diğerinin kayıtlarının üzerine yazar; tek örnek çalışsın
+    from PyQt6.QtCore import QLockFile
+
+    lock = QLockFile(str(store.path.parent / "driverwatch.lock"))
+    lock.setStaleLockTime(0)
+    if not lock.tryLock(100):
+        QMessageBox.information(
+            None, "DriverWatch zaten açık",
+            "DriverWatch zaten çalışıyor. Görev çubuğundaki pencereyi kullanın; "
+            "iki pencere aynı anda açıkken kayıtlar birbirinin üzerine yazılabilir.",
+        )
+        return 0
     w = MainWindow(store)
     w.show()
     return app.exec()
