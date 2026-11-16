@@ -5,7 +5,7 @@ import sys
 from datetime import date, datetime
 from pathlib import Path
 
-from PyQt6.QtCore import QThread, QTimer, Qt, QUrl, pyqtSignal
+from PyQt6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, QThread, QTimer, Qt, QUrl, pyqtSignal
 from PyQt6.QtGui import QDesktopServices, QFont, QIcon
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFrame,
@@ -54,6 +54,7 @@ def states() -> dict:
         "new": (_("NOT CHECKED YET"), C["gray"], C["gray_bg"], 4),
         "ok": (_("UP TO DATE"), C["green"], C["green_bg"], 5),
         "checking": (_("CHECKING…"), C["blue"], C["blue_bg"], 6),
+        "queued": (_("IN QUEUE"), C["gray"], C["gray_bg"], 6),
     }
 
 
@@ -507,11 +508,89 @@ class ItemDialog(QDialog):
 
 # ---------------------------------------------------------------- card
 
+class CardList(QWidget):
+    """Cards placed by hand so that a card can slide to its new place when the order changes."""
+
+    SPACING = 10
+    RIGHT_GAP = 4
+    DURATION = 450  # ms
+
+    def __init__(self):
+        super().__init__()
+        self.setObjectName("list")
+        self._cards: dict[str, QWidget] = {}
+        self._order: list[str] = []
+        self._anims: dict[str, QPropertyAnimation] = {}
+        self._fresh: set[str] = set()
+
+    @staticmethod
+    def _height(w: QWidget, width: int) -> int:
+        h = w.heightForWidth(width) if w.hasHeightForWidth() else -1
+        if h < 0:
+            h = w.sizeHint().height()
+        return max(h, w.minimumSizeHint().height())
+
+    def set_cards(self, pairs: list[tuple[str, QWidget]], animate: bool = True):
+        """pairs: (key, widget) in display order. A widget with a known key starts where the old one was."""
+        for a in self._anims.values():
+            a.stop()
+        self._anims.clear()
+        new: dict[str, QWidget] = {}
+        self._fresh = set()
+        for key, w in pairs:
+            w.setParent(self)
+            old = self._cards.pop(key, None)
+            if old is not None:
+                w.move(old.pos())
+                old.hide()
+                old.deleteLater()
+            else:
+                self._fresh.add(key)
+            new[key] = w
+        for old in self._cards.values():
+            old.hide()
+            old.deleteLater()
+        self._cards, self._order = new, [k for k, _w in pairs]
+        self._layout(animate)
+
+    def _layout(self, animate: bool):
+        width = max(200, self.width() - self.RIGHT_GAP)
+        y = 0
+        for key in self._order:
+            w = self._cards[key]
+            h = self._height(w, width)
+            w.resize(width, h)
+            target = QPoint(0, y)
+            if animate and key not in self._fresh and w.pos() != target:
+                a = QPropertyAnimation(w, b"pos", self)
+                a.setDuration(self.DURATION)
+                a.setEasingCurve(QEasingCurve.Type.OutCubic)
+                a.setStartValue(w.pos())
+                a.setEndValue(target)
+                a.start()
+                self._anims[key] = a
+            else:
+                w.move(target)
+            w.show()
+            y += h + self.SPACING
+        self.setMinimumHeight(max(0, y - self.SPACING))
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        for a in self._anims.values():
+            a.stop()
+        self._anims.clear()
+        self._fresh = set(self._order)  # place directly at the new width
+        self._layout(False)
+
+
 class Card(QFrame):
-    def __init__(self, win: "MainWindow", item: Item, checking: bool):
+    def __init__(self, win: "MainWindow", item: Item, mode: str = ""):
+        """mode: "" (normal), "checking" (being checked now) or "queued" (waiting in this check run)."""
         super().__init__()
         self.win, self.item = win, item
-        state = "checking" if checking else item.state
+        checking = bool(mode)
+        state = mode or item.state
         label, fg, bg, _o = states().get(state, states()["new"])
         self.setObjectName("card")
         self.setStyleSheet(
@@ -751,12 +830,10 @@ class MainWindow(QMainWindow):
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.listw = QWidget()
-        self.listw.setObjectName("list")
-        self.listl = QVBoxLayout(self.listw)
-        self.listl.setContentsMargins(0, 0, 4, 0)
-        self.listl.setSpacing(10)
-        self.scroll.setWidget(self.listw)
+        self.current_id: str | None = None  # item being checked right now
+        self._queue_pos: dict[str, int] = {}  # position of each item in the current check run
+        self.cards = CardList()
+        self.scroll.setWidget(self.cards)
         v.addWidget(self.scroll, 1)
 
         foot = QLabel(f"<span style='color:{C['muted']}'>{_('Data: {path} · Version {v}', path=self.store.path, v=__version__)}</span>")
@@ -768,20 +845,32 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(400, lambda: self.check([i.id for i in self.store.items]))
 
     # -- drawing
-    def render(self):
-        while self.listl.count():
-            w = self.listl.takeAt(0).widget()
-            if w:
-                w.deleteLater()
-        st = states()
-        items = sorted(self.store.items, key=lambda i: (st.get(i.state, st["new"])[3], i.name.lower()))
+    # top → bottom: updates, the one being checked, the queue, problems, missing info, up to date
+    _ORDER = {"update": 0, "lost": 3, "blocked": 3, "error": 3, "nocompare": 3, "noinstalled": 4, "new": 5, "ok": 6}
+
+    def _mode(self, item: Item) -> str:
+        if item.id == self.current_id:
+            return "checking"
+        return "queued" if item.id in self.checking else ""
+
+    def _order_key(self, item: Item):
+        mode = self._mode(item)
+        if mode == "queued":
+            # the queue is shown in the order it will be checked, so the next one is always on top
+            return (2, self._queue_pos.get(item.id, 0), "")
+        rank = 1 if mode == "checking" else self._ORDER.get(item.state, 5)
+        return (rank, 0, item.name.lower())
+
+    def render(self, animate: bool = True):
+        items = sorted(self.store.items, key=self._order_key)
         self._render_tabs()
+        pairs: list[tuple[str, QWidget]] = []
         if self.tab != "all":
             items = [i for i in items if i.kind == self.tab]
             if not items and self.store.items:
                 e = QLabel(_("No items of this kind."))
                 e.setStyleSheet(f"color:{C['muted']}; background:{C['panel']}; border:1px dashed {C['line']}; border-radius:10px; padding:18px;")
-                self.listl.addWidget(e)
+                pairs.append(("__empty_kind__", e))
         if not self.store.items:
             e = QLabel(
                 f"<div style='font-size:12pt'><b>{_('Nothing is being tracked yet.')}</b></div>"
@@ -791,10 +880,10 @@ class MainWindow(QMainWindow):
             )
             e.setWordWrap(True)
             e.setStyleSheet(f"background:{C['panel']}; border:1px dashed {C['line']}; border-radius:10px; padding:24px;")
-            self.listl.addWidget(e)
+            pairs.append(("__empty__", e))
         for it in items:
-            self.listl.addWidget(Card(self, it, it.id in self.checking))
-        self.listl.addStretch(1)
+            pairs.append((it.id, Card(self, it, self._mode(it))))
+        self.cards.set_cards(pairs, animate)
         self._render_summary()
 
     def _render_tabs(self):
@@ -955,19 +1044,31 @@ class MainWindow(QMainWindow):
     def check(self, ids: list[str]):
         if self.busy or not ids:
             return
+        # check in the order the cards are shown (top first)
+        shown = {it.id: n for n, it in enumerate(sorted(self.store.items, key=self._order_key))}
+        ids = sorted(ids, key=lambda i: shown.get(i, 0))
+        self._queue_pos = {i: n for n, i in enumerate(ids)}
         self.busy = True
         self.checking = set(ids)
+        self.current_id = None
         self._total, self._done = len(ids), 0
         self.b_all.setEnabled(False)
         self.progress.setText(_("Checking… {d} / {t}", d=0, t=self._total))
         self.render()
         self.worker = CheckWorker(self.store, ids)
+        self.worker.started_item.connect(self._on_started_item)
         self.worker.done_item.connect(self._on_done_item)
         self.worker.all_done.connect(self._on_all_done)
         self.worker.start()
 
+    def _on_started_item(self, item_id: str):
+        self.current_id = item_id
+        self.render()
+
     def _on_done_item(self, item_id: str):
         self.checking.discard(item_id)
+        if self.current_id == item_id:
+            self.current_id = None
         self._done += 1
         self.progress.setText(_("Checking… {d} / {t}", d=self._done, t=self._total))
         self.store.save()
@@ -976,6 +1077,7 @@ class MainWindow(QMainWindow):
     def _on_all_done(self):
         self.busy = False
         self.checking.clear()
+        self.current_id = None
         self.b_all.setEnabled(True)
         n_up = sum(1 for i in self.store.items if i.state == "update")
         self.progress.setText(

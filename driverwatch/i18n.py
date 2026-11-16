@@ -76,6 +76,7 @@ TR: dict[str, str] = {
     "NOT CHECKED YET": "HENÜZ KONTROL EDİLMEDİ",
     "UP TO DATE": "GÜNCEL",
     "CHECKING…": "KONTROL EDİLİYOR…",
+    "IN QUEUE": "SIRADA",
     "CANNOT COMPARE": "KARŞILAŞTIRILAMADI",
     # card
     "INSTALLED VERSION": "YÜKLÜ SÜRÜM",

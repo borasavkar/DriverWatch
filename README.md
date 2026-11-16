@@ -17,6 +17,7 @@ The interface is in English by default; Turkish can be selected from the **Langu
   - 🟢 **UP TO DATE**
   - 🟡 **SITE BLOCKS CHECKS / COULD NOT CHECK / VERSION NOT FOUND / CANNOT COMPARE**
   - 🔵 **INSTALLED VERSION NOT SET**
+- **Live order while checking:** items with a new version stay at the top, the one being checked comes next, then the queue in the order it will be checked; once checked, up-to-date items slide down to the bottom with a short animation.
 - **Coloured kind tags and tabs:** BIOS, Driver, Firmware, Software and Other each have their own colour, and tabs above the list show one kind at a time with its item count and how many have updates.
 - **Version is compared with version, date with date.** If both sides have a version number, versions decide. If one side has no version number (e.g. ASUS pages that only show “Version -” and a date), dates are compared. If there is no matching pair, the card says it cannot compare instead of guessing. Each card states what the decision was based on.
 - **Several files from one page.** Tick as many items as you like in the add dialog; each becomes its own card.
@@ -61,6 +62,7 @@ BIOS, sürücü ve firmware indirme sayfalarını takip eden küçük bir Window
 
 - **Linkler siz silene kadar kalır** (`%APPDATA%\DriverWatch\items.json`).
 - **Takip edilecek sürümü siz seçersiniz;** sayfadaki bütün sürümler bağlamıyla listelenir, beta sürümler kararlıların altında durur.
+- **Kontrol sırasında canlı sıralama:** yeni sürüm bulunanlar en üstte durur, ardından o an kontrol edilen ve sıradakiler gelir; kontrol edilip güncel çıkanlar kısa bir animasyonla en alta kayar.
 - **Renkli durum etiketleri:** YENİ SÜRÜM VAR, GÜNCEL, SİTE ENGELLİYOR / KONTROL EDİLEMEDİ / KARŞILAŞTIRILAMADI, YÜKLÜ SÜRÜM GİRİLMEDİ. BIOS, Sürücü, Firmware, Yazılım ve Diğer türlerinin her birinin kendi rengi vardır; listenin üstündeki sekmeler tek bir türü, kayıt sayısını ve kaçında güncelleme olduğunu gösterir.
 - **Sürüm sürümle, tarih tarihle karşılaştırılır.** İki tarafta da sürüm numarası varsa sürümlere bakılır; bir tarafta yoksa tarihlere bakılır; uygun çift yoksa program tahmin etmez, “KARŞILAŞTIRILAMADI” der. Kartta kararın neye göre verildiği yazar.
 - **Aynı sayfadan birden fazla dosya** eklenebilir; **gizli indirme linkleri** sayfanın verisinden bulunur; işletim sistemi seçilmeden liste göstermeyen sayfalarda bu bilgisayarın sistemi kendiliğinden seçilir.
